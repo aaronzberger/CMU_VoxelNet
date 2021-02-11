@@ -13,13 +13,14 @@ import cv2
 from utils import load_config, get_num_voxels, get_anchors, load_kitti_label
 from config import data_dir
 from utils import box3d_corner_to_center_batch, anchors_center_to_corner
-from utils import corner_to_standup_box2d_batch
-import time
+from utils import corner_to_standup_box2d_batch, Timer
+
+
+timer = Timer()
 
 
 class KittiDataset(data.Dataset):
     def __init__(self, split='train'):
-        # start_init = time.time()
         self.config = load_config()
 
         self.data_path = os.path.join(data_dir, '%sing' % split)
@@ -59,6 +60,7 @@ class KittiDataset(data.Dataset):
         pos_equal_one = np.zeros((*self.feature_map_shape, 2))
         neg_equal_one = np.zeros((*self.feature_map_shape, 2))
 
+        timer.start()
         # Convert from corners notation to xyzhwlr notation for bounding boxes
         gt_xyzhwlr = box3d_corner_to_center_batch(gt_box3d)
 
@@ -73,7 +75,6 @@ class KittiDataset(data.Dataset):
             np.ascontiguousarray(anchors_standup_2d).astype(np.float32),
             np.ascontiguousarray(gt_standup_2d).astype(np.float32),
         )
-
         # Indices of X highest anchors by IoU, X = number of ground truths
         id_highest = np.argmax(iou.T, axis=1)
 
@@ -234,26 +235,13 @@ class KittiDataset(data.Dataset):
         # visualize_lines_3d(gt_box3d, lidar)
 
         # Voxelize
-        # start_time = time.time()
         voxel_features, voxel_coords = self.voxelize(lidar)
 
-        # bounding-box encoding
+        # Calculate positive and negative anchors, and GT target
         pos_equal_one, neg_equal_one, targets = self.cal_target(gt_box3d)
-        # print('Shapes', pos_equal_one.shape, neg_equal_one.shape, targets.shape)
-        # nonzero = pos_equal_one.nonzero()
-        # print('pos', pos_equal_one[nonzero[0][0]][nonzero[1][0]])
-        # print('neg', neg_equal_one[nonzero[0][0]][nonzero[1][0]])
-        # print('targets', targets[nonzero[0][0]][nonzero[1][0]])
-
-        # print('--------------------------------------------------------')
-        # print('LIDAR SHAPE', lidar.shape)
-        # print('VOXEL FEATURES SHAPE', voxel_features.shape)
-        # print('VOXEL COORDS SHAPE', voxel_coords.shape)
-        # print('VOXEL FEATURES SAMPLE', voxel_features[0][:2])
-        # print('VOXEL COORDS SAMPLE', voxel_coords[0])
 
         return voxel_features, voxel_coords, pos_equal_one, \
-            neg_equal_one, targets, image, calib, self.file_list[i]
+            neg_equal_one, targets, lidar, image, calib, self.file_list[i]
 
     def __len__(self):
         return len(self.file_list)
@@ -265,10 +253,12 @@ def detection_collate(batch):
     pos_equal_one = []
     neg_equal_one = []
     targets = []
+    lidars = []
 
     images = []
     calibs = []
     ids = []
+
     for i, sample in enumerate(batch):
         voxel_features.append(sample[0])
 
@@ -281,26 +271,21 @@ def detection_collate(batch):
         pos_equal_one.append(sample[2])
         neg_equal_one.append(sample[3])
         targets.append(sample[4])
+        lidars.append(sample[5])
 
-        images.append(sample[5])
-        calibs.append(sample[6])
-        ids.append(sample[7])
+        images.append(sample[6])
+        calibs.append(sample[7])
+        ids.append(sample[8])
 
     return np.concatenate(voxel_features), np.concatenate(voxel_coords), \
         np.array(pos_equal_one), np.array(neg_equal_one), np.array(targets),\
-        images, calibs, ids
+        np.array(lidars), images, calibs, ids
 
 
-def get_data_loaders(batch_size, shuffle=False):
+def get_data_loader():
     train_dataset = KittiDataset(split='train')
     train_data_loader = data.DataLoader(
-        train_dataset, shuffle=True, batch_size=batch_size, num_workers=4,
-        collate_fn=detection_collate)
+        train_dataset, shuffle=True, batch_size=load_config()['batch_size'],
+        num_workers=4, collate_fn=detection_collate)
 
-    test_dataset = KittiDataset(split='test')
-    test_data_loader = data.DataLoader(
-        test_dataset, shuffle=shuffle, batch_size=batch_size, num_workers=8,
-        collate_fn=detection_collate)
-
-    return train_data_loader, test_data_loader, \
-        len(train_dataset), len(test_dataset)
+    return train_data_loader, len(train_data_loader)

@@ -2,7 +2,10 @@ from __future__ import division
 import os
 import json
 import math
+import errno
+import time
 
+import torch
 import numpy as np
 
 from config import base_dir
@@ -22,6 +25,24 @@ def load_config():
         config = json.load(file)
 
     return config
+
+
+def get_model_path(name):
+    '''
+    Get the path to save the state_dict
+
+    Parameters:
+        name (any): name of the epoch (can be a number or a token)
+    '''
+    config = load_config()
+    save_dir = os.path.join(base_dir, 'save')
+
+    mkdir_p(save_dir)
+
+    if name is None:
+        name = config['resume_from']
+
+    return os.path.join(save_dir, str(name)+'epoch')
 
 
 def get_num_voxels():
@@ -231,6 +252,7 @@ def anchors_center_to_corner(anchors):
         arr: the anchors in corner notation
     '''
     N = anchors.shape[0]
+
     anchors_corner = np.zeros((N, 4, 2))
 
     for i in range(N):
@@ -361,3 +383,117 @@ def load_kitti_label(label_file, Tr):
     gt_boxes3d_corner = np.array(gt_boxes3d_corner).reshape(-1, 8, 3)
 
     return gt_boxes3d_corner
+
+
+def mkdir_p(path):
+    '''
+    Create a directory at a given path if it does not already exist
+
+    Parameters:
+        path (string): the full os.path location for the directory
+    '''
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
+
+
+def delta_to_boxes3d(deltas, anchors):
+    '''
+    Convert regression map deltas to bounding boxes
+
+    Parameters:
+        deltas (arr): (N, W, L, 14): the regression output,
+            where N = batch size
+        anchors (arr): (X, 7): the anchors, where X = number of anchors
+
+    ReturnsL
+        arr: the bounding boxes
+    '''
+    N = deltas.shape[0]
+    deltas = deltas.view(N, -1, 7)
+    anchors = torch.FloatTensor(anchors)
+    boxes3d = torch.zeros_like(deltas)
+
+    if deltas.is_cuda:
+        anchors = anchors.cuda()
+        boxes3d = boxes3d.cuda()
+
+    anchors_reshaped = anchors.view(-1, 7)
+
+    anchors_d = torch.sqrt(
+        anchors_reshaped[:, 4]**2 + anchors_reshaped[:, 5]**2)
+
+    anchors_d = anchors_d.repeat(N, 2, 1).transpose(1, 2)
+    anchors_reshaped = anchors_reshaped.repeat(N, 1, 1)
+
+    boxes3d[..., [0, 1]] = torch.mul(
+        deltas[..., [0, 1]], anchors_d) \
+        + anchors_reshaped[..., [0, 1]]
+    boxes3d[..., [2]] = torch.mul(
+        deltas[..., [2]], anchors_reshaped[..., [3]]) \
+        + anchors_reshaped[..., [2]]
+
+    boxes3d[..., [3, 4, 5]] = torch.exp(
+        deltas[..., [3, 4, 5]]) * anchors_reshaped[..., [3, 4, 5]]
+
+    boxes3d[..., 6] = deltas[..., 6] + anchors_reshaped[..., 6]
+
+    return boxes3d
+
+
+def draw_boxes(reg_map, prob_score_map):
+    config = load_config()
+
+    # View as list of anchors
+    prob_score_map = prob_score_map.view(config['batch_size'], -1)
+
+    # Convert regression map deltas to actual bounding boxes
+    batch_boxes3d = delta_to_boxes3d(reg_map, get_anchors())
+
+    # Only use predictions where the prediction was > threshold
+    mask = torch.gt(prob_score_map, config['nms_score_threshold'])
+    mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
+
+    return_boxes = []
+    return_scores = []
+
+    for batch_id in range(config['batch_size']):
+        boxes3d = torch.masked_select(
+            batch_boxes3d[batch_id], mask_reg[batch_id]).view(-1, 7)
+        scores = torch.masked_select(
+            prob_score_map[batch_id], mask[batch_id])
+
+        return_boxes.append(boxes3d)
+        return_scores.append(scores)
+
+    return return_boxes, return_scores
+
+
+class Timer:
+    '''Simple timer class to keep track of mutliple running timers'''
+    def __init__(self, num=10):
+        self.timers = [time.time()] * num
+
+    def start(self, num=0):
+        self.check_list(num)
+        self.timers[num] = time.time()
+
+    def stop(self, num=0):
+        if num > len(self.timers) - 1:
+            raise ValueError('Timer {} doesn\'t exist'.format(num))
+        end = time.time() - self.timers[num]
+        self.timers[num] = time.time()
+        return end
+
+    def get(self, num=0):
+        self.check_list(num)
+        return time.time() - self.timers[num]
+
+    def check_list(self, num):
+        '''Double the length of the timer array if we need it'''
+        if num > len(self.timers) - 1:
+            self.timers = self.timers + [time.time()] * len(self.timers)
