@@ -15,7 +15,6 @@ from config import data_dir
 from utils import box3d_corner_to_center_batch, anchors_center_to_corner
 from utils import corner_to_standup_box2d_batch, Timer
 
-
 timer = Timer()
 
 
@@ -45,7 +44,8 @@ class KittiDataset(data.Dataset):
         Calculate the positive and negative anchors, and the target
 
         Parameters:
-            gt_box3d (arr): ground truth bounding boxes in corners notation
+            gt_box3d (arr): (N, 8, 3)
+                ground truth bounding boxes in corners notation
 
         Returns:
             arr: positive anchor positions
@@ -55,22 +55,23 @@ class KittiDataset(data.Dataset):
         #       _______________
         # dᵃ = √ (lᵃ)² + (wᵃ)²      is the diagonal of the base
         #                           of the anchor box (See 2.2)
-        anchors_d = np.sqrt(self.anchors[:, 4] ** 2 + self.anchors[:, 5] ** 2)
+        anchors_diagonal = np.sqrt(
+            self.anchors[:, 4] ** 2 + self.anchors[:, 5] ** 2)
 
         pos_equal_one = np.zeros((*self.feature_map_shape, 2))
         neg_equal_one = np.zeros((*self.feature_map_shape, 2))
 
-        timer.start()
-        # Convert from corners notation to xyzhwlr notation for bounding boxes
+        # Convert from corner to center notation ((N, 8, 3) -> (N, 7))
         gt_xyzhwlr = box3d_corner_to_center_batch(gt_box3d)
 
         # Convert anchors to corner notation (BEV)
         anchors_corner = anchors_center_to_corner(self.anchors)
 
-        # Convert to xyxy bounding boxes in BEV
+        # Convert to from all corners to only 2 [xyxy]
         anchors_standup_2d = corner_to_standup_box2d_batch(anchors_corner)
         gt_standup_2d = corner_to_standup_box2d_batch(gt_box3d)
 
+        # Calculate IoU of the ground truth and anchors (BEV)
         iou = bbox_overlaps(
             np.ascontiguousarray(anchors_standup_2d).astype(np.float32),
             np.ascontiguousarray(gt_standup_2d).astype(np.float32),
@@ -88,7 +89,8 @@ class KittiDataset(data.Dataset):
         # An anchor is considered as positive if it has the highest IoU
         # with a ground truth or its IoU with ground truth is ≥ pos_threshold
         # (in BEV). (See 3.1)
-        # id_pos: Index of anchor; id_pos_gt: Index of ground truth
+
+        # id_pos: Index of anchor        id_pos_gt: Index of ground truth
         id_pos, id_pos_gt = np.where(iou > self.config['IOU_pos_threshold'])
 
         # An anchor is considered as negative if the IoU between it and all
@@ -104,14 +106,14 @@ class KittiDataset(data.Dataset):
         id_pos, index = np.unique(id_pos, return_index=True)
         id_pos_gt = id_pos_gt[index]
 
-        # Calculate the target and set corresponding feature map spaces to 1
+        # Calculate target (𝘂*) and set corresponding feature map spaces to 1
         index_x, index_y, index_z = np.unravel_index(
             id_pos,
             (*self.feature_map_shape, self.config['anchors_per_position']))
         pos_equal_one[index_x, index_y, index_z] = 1
 
         # To retrieve the ground truth box from a matching positive anchor,
-        # we define the residual vector "targets" containing the 7
+        # we define the residual vector 𝘂* ("targets") containing the 7
         # regression targets corresponding to center location ∆x,∆y,∆z,
         # three dimensions ∆l,∆w,∆h, and the rotation ∆θ (See 2.2)
         targets = np.zeros((*self.feature_map_shape, 14))
@@ -119,12 +121,12 @@ class KittiDataset(data.Dataset):
         # Δx = (xᵍ - xᵃ) / dᵃ
         targets[index_x, index_y, np.array(index_z) * 7] = \
             (gt_xyzhwlr[id_pos_gt, 0] - self.anchors[id_pos, 0]) \
-            / anchors_d[id_pos]
+            / anchors_diagonal[id_pos]
 
         # Δy = (yᵍ - yᵃ) / dᵃ
         targets[index_x, index_y, np.array(index_z) * 7 + 1] = \
             (gt_xyzhwlr[id_pos_gt, 1] - self.anchors[id_pos, 1]) \
-            / anchors_d[id_pos]
+            / anchors_diagonal[id_pos]
 
         # Δz = (zᵍ - zᵃ) / hᵃ
         targets[index_x, index_y, np.array(index_z) * 7 + 2] = \
@@ -193,7 +195,7 @@ class KittiDataset(data.Dataset):
             voxel = np.zeros(
                 (self.config['max_pts_per_voxel'], 7), dtype=np.float32)
 
-            # inv_ind gives the indexes of the elements in the original array
+            # inv_ind gives the indices of the elements in the original array
             pts = lidar[inv_ind == i]
 
             if voxel_counts[i] > self.config['max_pts_per_voxel']:
@@ -286,6 +288,6 @@ def get_data_loader():
     train_dataset = KittiDataset(split='train')
     train_data_loader = data.DataLoader(
         train_dataset, shuffle=True, batch_size=load_config()['batch_size'],
-        num_workers=4, collate_fn=detection_collate)
+        num_workers=8, collate_fn=detection_collate)
 
     return train_data_loader, len(train_data_loader)

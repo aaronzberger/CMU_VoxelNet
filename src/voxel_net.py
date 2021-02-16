@@ -187,7 +187,8 @@ class VoxelNet(nn.Module):
                                     self.voxel_H, self.voxel_W).to(self.device)
 
         dense_feature[:, coords[:, 0], coords[:, 1],
-                      coords[:, 2], coords[:, 3]] = sparse_features.transpose(0, 1)
+                      coords[:, 2], coords[:, 3]] = \
+            sparse_features.transpose(0, 1)
 
         return dense_feature.transpose(0, 1)
 

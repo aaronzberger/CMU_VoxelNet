@@ -4,10 +4,10 @@
     "batch_size": 1,
     "learning_rate": 0.01,
     "max_epochs": 50,
-    "save_every": 10,
-    "resume_from": 0,
+    "save_every": 1,
+    "resume_from": 4,
     "viz_every": 1,
-    "num_viz": 10,
+    "num_viz": 20,
 
     "voxel_loss_params": {
         "alpha": 1.0,

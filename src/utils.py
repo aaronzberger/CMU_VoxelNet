@@ -180,7 +180,7 @@ def load_kitti_calib(calib_file):
             'Tr_velo2cam': Tr_velo_to_cam.reshape(3, 4)}
 
 
-def box3d_cam_to_velo(box3d, Tr):
+def box3d_cam_to_velo(box3d, Tr=None):
     '''
     Transform bounding boxes from center to corner notation
     and transform to velodyne frame
@@ -194,6 +194,8 @@ def box3d_cam_to_velo(box3d, Tr):
     '''
 
     def project_cam2velo(cam, Tr):
+        if Tr is None:
+            return cam[:3].reshape(1, 3)
         T = np.zeros([4, 4], dtype=np.float32)
         T[:3, :] = Tr
         T[3, 3] = 1
@@ -244,9 +246,10 @@ def box3d_cam_to_velo(box3d, Tr):
 def anchors_center_to_corner(anchors):
     '''
     Convert anchors to corner notation (BEV only)
+    (N, 7) -> (N, 4, 3)
 
     Parameters:
-        anchors (arr): the anchors
+        anchors (arr): the anchors in the form [xyzhwlr]
 
     Returns:
         arr: the anchors in corner notation
@@ -256,7 +259,6 @@ def anchors_center_to_corner(anchors):
     anchors_corner = np.zeros((N, 4, 2))
 
     for i in range(N):
-        # Anchor is in xyzhwlr notation
         anchor = anchors[i]
         h, w, l = anchor[3:6]
         rz = anchor[-1]
@@ -265,15 +267,21 @@ def anchors_center_to_corner(anchors):
             [-l/2, -l/2, l/2, l/2],
             [w/2, -w/2, -w/2, w/2]])
 
-        # re-create 3D bounding box in velodyne coordinate system
+        # re-create 3D bounding box in velodyne frame
         rotMat = np.array([
             [np.cos(rz), -np.sin(rz)],
             [np.sin(rz), np.cos(rz)]])
+
+        # (2, 2) * (2, 4) = (2, 4)
         velo_box = np.dot(rotMat, Box)
 
+        # Add rotation matrix to (2, 4) of Xs, then Ys
         cornerPosInVelo = velo_box + np.tile(anchor[:2], (4, 1)).T
+
+        # [XXXX,YYYY] -> [XY,XY,XY,XY]
         box2d = cornerPosInVelo.transpose()
         anchors_corner[i] = box2d
+
     return anchors_corner
 
 
@@ -301,7 +309,8 @@ def corner_to_standup_box2d_batch(boxes_corner):
 
 def box3d_corner_to_center_batch(box3d_corner):
     '''
-    Convert a batch of ground truth bounding boxes to xyzhwlr from points
+    Convert a batch of ground truth bounding boxes from corner to center
+    notation (N, 8, 3) -> (N, 7)
 
     Parameters:
         box3d_corner (arr): bounding boxes in corner notation
@@ -309,13 +318,9 @@ def box3d_corner_to_center_batch(box3d_corner):
     Returns:
         arr: bounding boxes in xyzhwlr notation
     '''
-    # (N, 8, 3) -> (N, 7)
     assert box3d_corner.ndim == 3
 
     xyz = np.mean(box3d_corner[:, :4, :], axis=1)
-
-    height = abs(np.mean(box3d_corner[:, 4:, 2] - box3d_corner[:, :4, 2],
-                         axis=1, keepdims=True))
 
     #     2―――――1       2―――――1
     #    / top /|      /|     |     -> which points the elements of the input
@@ -323,13 +328,17 @@ def box3d_corner_to_center_batch(box3d_corner):
     #   |     | 5     | 6―――――5        by index
     #   |     |/      |/ bot /
     #   7―――――4       7―――――4
+
+    # Define height as the difference between the top and bottom coordinates
+    height = abs(np.mean(box3d_corner[:, 4:, 2] - box3d_corner[:, :4, 2],
+                         axis=1, keepdims=True))
     #                      _______________
     # width = average of  √ (pt₁ - pt₂)²    for all points on the same side
     width = (np.sqrt(np.sum((box3d_corner[:, 0, [0, 1]] - box3d_corner[:, 1, [0, 1]]) ** 2, axis=1, keepdims=True)) +
              np.sqrt(np.sum((box3d_corner[:, 2, [0, 1]] - box3d_corner[:, 3, [0, 1]]) ** 2, axis=1, keepdims=True)) +
              np.sqrt(np.sum((box3d_corner[:, 4, [0, 1]] - box3d_corner[:, 5, [0, 1]]) ** 2, axis=1, keepdims=True)) +
              np.sqrt(np.sum((box3d_corner[:, 6, [0, 1]] - box3d_corner[:, 7, [0, 1]]) ** 2, axis=1, keepdims=True))) / 4
-    #                      _______________
+    #                       _______________
     # length = average of  √ (pt₁ - pt₂)²   for all points on the opposite side
     length = (np.sqrt(np.sum((box3d_corner[:, 0, [0, 1]] - box3d_corner[:, 3, [0, 1]]) ** 2, axis=1, keepdims=True)) +
               np.sqrt(np.sum((box3d_corner[:, 1, [0, 1]] - box3d_corner[:, 2, [0, 1]]) ** 2, axis=1, keepdims=True)) +
@@ -458,8 +467,9 @@ def draw_boxes(reg_map, prob_score_map):
     mask = torch.gt(prob_score_map, config['nms_score_threshold'])
     mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
 
-    return_boxes = []
-    return_scores = []
+    nonzero = torch.nonzero(mask).shape[0]
+    return_boxes = torch.zeros((config['batch_size'], nonzero, 7))
+    return_scores = torch.zeros((config['batch_size'], nonzero))
 
     for batch_id in range(config['batch_size']):
         boxes3d = torch.masked_select(
@@ -467,8 +477,8 @@ def draw_boxes(reg_map, prob_score_map):
         scores = torch.masked_select(
             prob_score_map[batch_id], mask[batch_id])
 
-        return_boxes.append(boxes3d)
-        return_scores.append(scores)
+        return_boxes[batch_id] = boxes3d
+        return_scores[batch_id] = scores
 
     return return_boxes, return_scores
 
