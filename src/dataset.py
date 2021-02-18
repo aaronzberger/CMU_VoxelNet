@@ -8,8 +8,6 @@ from box_overlaps import bbox_overlaps
 import numpy as np
 import cv2
 
-# from data_aug import aug_data
-# from viz_3d import visualize_lines_3d
 from utils import load_config, get_num_voxels, get_anchors, load_kitti_label
 from config import data_dir
 from utils import box3d_corner_to_center_batch, anchors_center_to_corner
@@ -228,10 +226,6 @@ class KittiDataset(data.Dataset):
 
         image = cv2.imread(image_file)
 
-        # For now, skip data augmentation; we won't be using this one for trees
-        # Data Augmentation
-        # lidar, gt_box3d = aug_data(lidar, gt_box3d)
-
         # Crop the lidar
         lidar, gt_box3d = utils.get_filtered_lidar(lidar, gt_box3d)
 
@@ -242,15 +236,6 @@ class KittiDataset(data.Dataset):
 
         # Calculate positive and negative anchors, and GT target
         pos_equal_one, neg_equal_one, targets = self.cal_target(gt_box3d)
-
-        # print(pos_equal_one.shape)
-        # print(pos_equal_one[0][0])
-        # print(neg_equal_one.shape)
-        # print(neg_equal_one[0][0])
-        # print(targets.shape)
-        # print(targets[0][0])
-        # print(voxel_features.shape, voxel_features[0][:2])
-        # print(voxel_coords.shape, voxel_coords[0])
 
         return voxel_features, voxel_coords, pos_equal_one, \
             neg_equal_one, targets, gt_box3d, lidar, image, calib, \
