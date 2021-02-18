@@ -29,7 +29,8 @@ class KittiDataset(data.Dataset):
         self.label_path = os.path.join(self.data_path, "label_2/")
 
         # Open the split file, containing numbers of the examples in this split
-        with open(os.path.join(self.data_path, '%s.txt' % split)) as f:
+        # with open(os.path.join(self.data_path, '%s.txt' % split)) as f:
+        with open(os.path.join(self.data_path, 'test_net.txt')) as f:
             self.file_list = f.read().splitlines()
 
         # Calculate the size of the voxel grid in every dimensions
@@ -133,7 +134,7 @@ class KittiDataset(data.Dataset):
             (gt_xyzhwlr[id_pos_gt, 2] - self.anchors[id_pos, 2]) \
             / self.anchors[id_pos, 3]
 
-        # Δl = log(lᵍ / lᵃ)
+        # Δh = log(hᵍ / hᵃ)
         targets[index_x, index_y, np.array(index_z) * 7 + 3] = \
             np.log(gt_xyzhwlr[id_pos_gt, 3] / self.anchors[id_pos, 3])
 
@@ -141,7 +142,7 @@ class KittiDataset(data.Dataset):
         targets[index_x, index_y, np.array(index_z) * 7 + 4] = \
             np.log(gt_xyzhwlr[id_pos_gt, 4] / self.anchors[id_pos, 4])
 
-        # Δh = log(hᵍ / hᵃ)
+        # Δl = log(lᵍ / lᵃ)
         targets[index_x, index_y, np.array(index_z) * 7 + 5] = \
             np.log(gt_xyzhwlr[id_pos_gt, 5] / self.anchors[id_pos, 5])
 
@@ -242,8 +243,18 @@ class KittiDataset(data.Dataset):
         # Calculate positive and negative anchors, and GT target
         pos_equal_one, neg_equal_one, targets = self.cal_target(gt_box3d)
 
+        # print(pos_equal_one.shape)
+        # print(pos_equal_one[0][0])
+        # print(neg_equal_one.shape)
+        # print(neg_equal_one[0][0])
+        # print(targets.shape)
+        # print(targets[0][0])
+        # print(voxel_features.shape, voxel_features[0][:2])
+        # print(voxel_coords.shape, voxel_coords[0])
+
         return voxel_features, voxel_coords, pos_equal_one, \
-            neg_equal_one, targets, lidar, image, calib, self.file_list[i]
+            neg_equal_one, targets, gt_box3d, lidar, image, calib, \
+            self.file_list[i]
 
     def __len__(self):
         return len(self.file_list)
@@ -255,6 +266,7 @@ def detection_collate(batch):
     pos_equal_one = []
     neg_equal_one = []
     targets = []
+    gt_bounding_boxes = []
     lidars = []
 
     images = []
@@ -273,15 +285,16 @@ def detection_collate(batch):
         pos_equal_one.append(sample[2])
         neg_equal_one.append(sample[3])
         targets.append(sample[4])
-        lidars.append(sample[5])
+        gt_bounding_boxes.append(sample[5])
+        lidars.append(sample[6])
 
-        images.append(sample[6])
-        calibs.append(sample[7])
-        ids.append(sample[8])
+        images.append(sample[7])
+        calibs.append(sample[8])
+        ids.append(sample[9])
 
     return np.concatenate(voxel_features), np.concatenate(voxel_coords), \
-        np.array(pos_equal_one), np.array(neg_equal_one), np.array(targets),\
-        np.array(lidars), images, calibs, ids
+        np.array(pos_equal_one), np.array(neg_equal_one), np.array(targets), \
+        np.array(gt_bounding_boxes), np.array(lidars), images, calibs, ids
 
 
 def get_data_loader():

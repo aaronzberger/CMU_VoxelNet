@@ -3,9 +3,9 @@
 
     "batch_size": 1,
     "learning_rate": 0.01,
-    "max_epochs": 50,
-    "save_every": 1,
-    "resume_from": 4,
+    "max_epochs": 100,
+    "save_every": 100,
+    "resume_from": 89,
     "viz_every": 1,
     "num_viz": 20,
 

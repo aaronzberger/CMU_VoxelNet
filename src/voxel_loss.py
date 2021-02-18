@@ -40,7 +40,7 @@ class VoxelLoss(nn.Module):
 
         conf_loss = self.alpha * cls_pos_loss + self.beta * cls_neg_loss
 
-        # (1/Nₚₒₛ) ∑ REG(𝘂ᵢ, 𝘂ᵢ﹡)
+        # (1/Nₚₒₛ) ∑ REG(𝘂ᵢ, 𝘂ᵢ*)
         reg_loss = self.smoothl1loss(reg_map_pos, targets_pos)
         reg_loss = reg_loss / (pos_equal_one.sum() + 1e-6)
 

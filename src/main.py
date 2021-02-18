@@ -55,6 +55,7 @@ def train(device):
                 indices = np.random.choice(
                     np.arange(len(train_data_loader) // config['batch_size']),
                     replace=False, size=(config['num_viz']))
+                indices = [1, 2, 3, 4, 5, 6, 7, 8]
             else:
                 indices = []
 
@@ -67,8 +68,8 @@ def train(device):
                       position=1) as progress:
 
                 for voxel_features, voxel_coords, pos_equal_one, \
-                    neg_equal_one, targets, lidar, image, calibs, ids \
-                        in train_data_loader:
+                    neg_equal_one, targets, gt_bounding_boxes, lidar, image, \
+                        calibs, ids in train_data_loader:
 
                     optimizer.zero_grad()
 
@@ -93,11 +94,12 @@ def train(device):
 
                     with torch.no_grad():
                         if progress.n // config['batch_size'] in indices:
-                            bounding_boxes, scores = draw_boxes(
-                                reg_map, prob_score_map)
+                            boxes_corner, bounding_boxes, scores = draw_boxes(
+                                reg_map, prob_score_map, calibs)
                             save_center_batch(
-                                batch_boxes=bounding_boxes.cpu().numpy(),
-                                batch_lidar=lidar, epoch=epoch, ids=ids)
+                                batch_boxes=boxes_corner,
+                                batch_lidar=lidar, epoch=epoch, ids=ids,
+                                gt_boxes=gt_bounding_boxes)
 
                     progress.set_postfix(
                         **{'loss': '{:.4f}'.format(abs(loss.item()))})

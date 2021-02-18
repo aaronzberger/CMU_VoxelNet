@@ -180,6 +180,58 @@ def load_kitti_calib(calib_file):
             'Tr_velo2cam': Tr_velo_to_cam.reshape(3, 4)}
 
 
+def box3d_center_to_corner_batch(boxes_center):
+    '''
+    Transform bounding boxes from center to corner notation
+
+    Parameters:
+        boxes_center (arr): (N, X, 7):
+            boxes in center notation
+
+    Returns:
+        arr: bounding box in corner notation
+    '''
+    boxes_center = boxes_center.cpu().numpy()
+    batch_size = boxes_center.shape[0]
+    num_boxes = boxes_center.shape[1]
+
+    # To return
+    corner_boxes = np.zeros((batch_size, num_boxes, 8, 3))
+
+    for batch_id in range(batch_size):
+        boxes = boxes_center[batch_id]
+
+        for box_num, box in enumerate(boxes):
+            translation = box[0:3]
+            size = box[3:6]
+            rotation = [0, 0, box[-1]]
+
+            h, w, l = size[0], size[1], size[2]
+            bounding_box = np.array([
+                [-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
+                [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
+                [0, 0, 0, 0, h, h, h, h]])
+
+            # re-create 3D bounding box in velodyne coordinate system
+            yaw = rotation[2]
+            rotation_matrix = np.array([
+                [np.cos(yaw), -np.sin(yaw), 0.0],
+                [np.sin(yaw), np.cos(yaw), 0.0],
+                [0.0, 0.0, 1.0]])
+
+            # Just repeat [x, y, z] eight times
+            eight_points = np.tile(translation, (8, 1))
+
+            # Add rotated bounding box to the center position to obtain corners
+            cornerPosInVelo = np.dot(
+                rotation_matrix, bounding_box) + eight_points.transpose()
+            box3d = cornerPosInVelo.transpose()
+
+            corner_boxes[batch_id][box_num] = box3d
+
+    return corner_boxes
+
+
 def box3d_cam_to_velo(box3d, Tr=None):
     '''
     Transform bounding boxes from center to corner notation
@@ -214,6 +266,7 @@ def box3d_cam_to_velo(box3d, Tr=None):
 
         return angle
 
+    # KITTI labels are formatted [hwlxyzr]
     h, w, l, tx, ty, tz, ry = [float(i) for i in box3d]
 
     # Position in labels are in cam coordinates. Transform to lidar coords
@@ -223,20 +276,21 @@ def box3d_cam_to_velo(box3d, Tr=None):
     cam[2] = tz
     t_lidar = project_cam2velo(cam, Tr)
 
-    Box = np.array([[-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
-                    [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
-                    [0, 0, 0, 0, h, h, h, h]])
+    bounding_box = np.array([[-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
+                             [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
+                             [0, 0, 0, 0, h, h, h, h]])
 
     rz = ry_to_rz(ry)
 
-    rotMat = np.array([
+    rotation_matrix = np.array([
         [np.cos(rz), -np.sin(rz), 0.0],
         [np.sin(rz), np.cos(rz), 0.0],
         [0.0, 0.0, 1.0]])
 
-    velo_box = np.dot(rotMat, Box)
+    eight_points = np.tile(t_lidar, (8, 1))
 
-    cornerPosInVelo = velo_box + np.tile(t_lidar, (8, 1)).T
+    cornerPosInVelo = np.dot(
+        rotation_matrix, bounding_box) + eight_points.transpose()
 
     box3d_corner = cornerPosInVelo.transpose()
 
@@ -263,20 +317,20 @@ def anchors_center_to_corner(anchors):
         h, w, l = anchor[3:6]
         rz = anchor[-1]
 
-        Box = np.array([
+        bounding_box = np.array([
             [-l/2, -l/2, l/2, l/2],
             [w/2, -w/2, -w/2, w/2]])
 
         # re-create 3D bounding box in velodyne frame
-        rotMat = np.array([
+        rotation_matrix = np.array([
             [np.cos(rz), -np.sin(rz)],
             [np.sin(rz), np.cos(rz)]])
 
-        # (2, 2) * (2, 4) = (2, 4)
-        velo_box = np.dot(rotMat, Box)
+        four_points = np.tile(anchor[:2], (4, 1))
 
         # Add rotation matrix to (2, 4) of Xs, then Ys
-        cornerPosInVelo = velo_box + np.tile(anchor[:2], (4, 1)).T
+        cornerPosInVelo = np.dot(rotation_matrix, bounding_box) + \
+            four_points.transpose()
 
         # [XXXX,YYYY] -> [XY,XY,XY,XY]
         box2d = cornerPosInVelo.transpose()
@@ -432,29 +486,40 @@ def delta_to_boxes3d(deltas, anchors):
         boxes3d = boxes3d.cuda()
 
     anchors_reshaped = anchors.view(-1, 7)
+    #       _______________
+    # dᵃ = √ (lᵃ)² + (wᵃ)²      is the diagonal of the base
+    #                           of the anchor box (See 2.2)
+    anchors_diagonal = torch.sqrt(
+        anchors_reshaped[:, 4] ** 2 + anchors_reshaped[:, 5] ** 2)
 
-    anchors_d = torch.sqrt(
-        anchors_reshaped[:, 4]**2 + anchors_reshaped[:, 5]**2)
+    # Repeat so we can multiply X and Y in same mul operation
+    anchors_diagonal = anchors_diagonal.repeat(N, 2, 1).transpose(1, 2)
 
-    anchors_d = anchors_d.repeat(N, 2, 1).transpose(1, 2)
+    # Copy over the batch size
     anchors_reshaped = anchors_reshaped.repeat(N, 1, 1)
 
+    # Δx = (xᵍ - xᵃ) / dᵃ and Δy = (yᵍ - yᵃ) / dᵃ
+    # so x = (Δx * dᵃ) + xᵃ and y = (Δy * dᵃ) + yᵃ
     boxes3d[..., [0, 1]] = torch.mul(
-        deltas[..., [0, 1]], anchors_d) \
+        deltas[..., [0, 1]], anchors_diagonal) \
         + anchors_reshaped[..., [0, 1]]
+
+    # Δz = (zᵍ - zᵃ) / hᵃ so z = (Δz * hᵃ) + zᵃ
     boxes3d[..., [2]] = torch.mul(
         deltas[..., [2]], anchors_reshaped[..., [3]]) \
         + anchors_reshaped[..., [2]]
 
+    # Δw = log(wᵍ / wᵃ) so w = e^(Δw) * wᵃ
     boxes3d[..., [3, 4, 5]] = torch.exp(
         deltas[..., [3, 4, 5]]) * anchors_reshaped[..., [3, 4, 5]]
 
+    # Δ𝜃 = 𝜃ᵍ - 𝜃ᵃ, so 𝜃 = Δ𝜃 + 𝜃ᵃ
     boxes3d[..., 6] = deltas[..., 6] + anchors_reshaped[..., 6]
 
     return boxes3d
 
 
-def draw_boxes(reg_map, prob_score_map):
+def draw_boxes(reg_map, prob_score_map, calibs):
     config = load_config()
 
     # View as list of anchors
@@ -464,7 +529,9 @@ def draw_boxes(reg_map, prob_score_map):
     batch_boxes3d = delta_to_boxes3d(reg_map, get_anchors())
 
     # Only use predictions where the prediction was > threshold
-    mask = torch.gt(prob_score_map, config['nms_score_threshold'])
+    mask = torch.gt(torch.sigmoid(prob_score_map),
+                    config['nms_score_threshold'])
+
     mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
 
     nonzero = torch.nonzero(mask).shape[0]
@@ -480,11 +547,18 @@ def draw_boxes(reg_map, prob_score_map):
         return_boxes[batch_id] = boxes3d
         return_scores[batch_id] = scores
 
-    return return_boxes, return_scores
+    # Convert the final boxes from center [xyzhwlr] to corner points notation
+    boxes_corner = box3d_center_to_corner_batch(return_boxes, calibs)
+
+    return boxes_corner, return_boxes, return_scores
 
 
 class Timer:
-    '''Simple timer class to keep track of mutliple running timers'''
+    '''
+    Simple timer class to keep track of mutliple running timers.
+    Just used for debugging.
+    '''
+
     def __init__(self, num=10):
         self.timers = [time.time()] * num
 
