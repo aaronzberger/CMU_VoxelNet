@@ -5,7 +5,7 @@ import torch
 from utils import load_config, get_model_path, mkdir_p
 from conversions import ouput_to_boxes
 from torch.utils.tensorboard import SummaryWriter
-from viz_3d import save_center_batch
+from viz_3d import save_viz_batch
 from voxel_loss import VoxelLoss
 from tqdm import tqdm
 import numpy as np
@@ -108,7 +108,7 @@ def train(device):
                     if progress.n // config['batch_size'] in indices:
                         boxes_corner, boxes_center = ouput_to_boxes(
                             prob_score_map, reg_map)
-                        save_center_batch(
+                        save_viz_batch(
                             batch_boxes=boxes_corner,
                             batch_lidar=lidar, epoch=epoch, ids=ids,
                             gt_boxes=gt_bounding_boxes)
