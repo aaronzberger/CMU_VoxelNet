@@ -2,12 +2,16 @@ from dataset import get_data_loader
 from voxel_net import VoxelNet
 import argparse
 import torch
-from utils import load_config, draw_boxes, get_model_path
+from utils import load_config, get_model_path, mkdir_p
+from conversions import ouput_to_boxes
+from torch.utils.tensorboard import SummaryWriter
 from viz_3d import save_center_batch
 from voxel_loss import VoxelLoss
 from tqdm import tqdm
 import numpy as np
 import csv
+import os
+from config import base_dir
 
 
 def build_model(device):
@@ -26,6 +30,9 @@ def build_model(device):
 
 
 def train(device):
+    mkdir_p(os.path.join(base_dir, 'log'))
+    writer = SummaryWriter(log_dir=os.path.join(base_dir, 'log'))
+    writer_counter = 0
     config = load_config()
     net, loss_fn, optimizer, scheduler = build_model(device)
 
@@ -47,84 +54,87 @@ def train(device):
     all_losses = []
 
     for epoch in range(start_epoch, end_epoch):
-        with tqdm(total=end_epoch, desc='Training', unit='epochs', leave=True,
-                  colour='magenta', position=0, initial=start_epoch - 1) \
-                as epoch_tracker:
+        if epoch % config['viz_every'] == 0:
+            indices = np.random.choice(
+                np.arange(len(train_data_loader) // config['batch_size']),
+                replace=False, size=(config['num_viz']))
+        else:
+            indices = []
 
-            if epoch % config['viz_every'] == 0:
-                indices = np.random.choice(
-                    np.arange(len(train_data_loader) // config['batch_size']),
-                    replace=False, size=(config['num_viz']))
-                indices = [1, 2, 3, 4, 5, 6, 7, 8]
-            else:
-                indices = []
+        epoch_loss = 0
+        epoch_losses = []
+        net.train()
 
-            epoch_loss = 0
-            epoch_losses = []
-            net.train()
+        with tqdm(total=num_train, desc='Epoch %s/%s' % (epoch, end_epoch),
+                  unit='pointclouds', leave=False, colour='green') as progress:
 
-            with tqdm(total=num_train, desc='Epoch %s/%s' % (epoch, end_epoch),
-                      unit='pointclouds', leave=True, colour='green',
-                      position=1) as progress:
+            for voxel_features, voxel_coords, pos_equal_one, \
+                neg_equal_one, targets, gt_bounding_boxes, lidar, image, \
+                    calibs, ids in train_data_loader:
 
-                for voxel_features, voxel_coords, pos_equal_one, \
-                    neg_equal_one, targets, gt_bounding_boxes, lidar, image, \
-                        calibs, ids in train_data_loader:
+                optimizer.zero_grad()
 
-                    optimizer.zero_grad()
+                # Forward Prop
+                voxel_features = torch.Tensor(voxel_features).to(device)
+                voxel_coords = torch.Tensor(voxel_coords).to(device)
+                prob_score_map, reg_map = net(voxel_features, voxel_coords)
 
-                    # Forward Prop
-                    voxel_features = torch.Tensor(voxel_features).to(device)
-                    voxel_coords = torch.Tensor(voxel_coords).to(device)
-                    prob_score_map, reg_map = net(voxel_features, voxel_coords)
+                pos_equal_one = torch.Tensor(pos_equal_one).to(device)
+                neg_equal_one = torch.Tensor(neg_equal_one).to(device)
+                targets = torch.Tensor(targets).to(device)
 
-                    pos_equal_one = torch.Tensor(pos_equal_one).to(device)
-                    neg_equal_one = torch.Tensor(neg_equal_one).to(device)
-                    targets = torch.Tensor(targets).to(device)
+                # Loss
+                loss, conf_loss, reg_loss = loss_fn(
+                    prob_score_map, reg_map,
+                    pos_equal_one, neg_equal_one, targets)
 
-                    # Loss
-                    loss, conf_loss, reg_loss = loss_fn(
-                        prob_score_map, reg_map,
-                        pos_equal_one, neg_equal_one, targets)
+                loss.backward()
+                optimizer.step()
 
-                    loss.backward()
-                    optimizer.step()
+                writer.add_scalars(
+                    main_tag="training",
+                    tag_scalar_dict={
+                        "loss": loss.item(),
+                        "conf_loss": conf_loss.item(),
+                        "reg_loss": reg_loss.item(),
+                    }, global_step=writer_counter
+                )
 
-                    epoch_losses.append(loss.item())
+                writer_counter += 1
 
-                    with torch.no_grad():
-                        if progress.n // config['batch_size'] in indices:
-                            boxes_corner, bounding_boxes, scores = draw_boxes(
-                                reg_map, prob_score_map, calibs)
-                            save_center_batch(
-                                batch_boxes=boxes_corner,
-                                batch_lidar=lidar, epoch=epoch, ids=ids,
-                                gt_boxes=gt_bounding_boxes)
+                epoch_losses.append(loss.item())
 
-                    progress.set_postfix(
-                        **{'loss': '{:.4f}'.format(abs(loss.item()))})
+                with torch.no_grad():
+                    if progress.n // config['batch_size'] in indices:
+                        boxes_corner, boxes_center = ouput_to_boxes(
+                            prob_score_map, reg_map)
+                        save_center_batch(
+                            batch_boxes=boxes_corner,
+                            batch_lidar=lidar, epoch=epoch, ids=ids,
+                            gt_boxes=gt_bounding_boxes)
 
-                    epoch_loss += loss
+                progress.set_postfix(
+                    **{'loss': '{:.4f}'.format(abs(loss.item()))})
 
-                    progress.update(config['batch_size'])
+                epoch_loss += loss
 
-            epoch_tracker.update()
+                progress.update(config['batch_size'])
 
-            all_losses.append(epoch_losses)
+        all_losses.append(epoch_losses)
 
-            with open('/home/aaron/losses.csv', 'w') as loss_writer:
-                csv_writer = csv.writer(loss_writer)
-                for row in all_losses:
-                    csv_writer.writerow(row)
+        with open('/home/aaron/losses.csv', 'w') as loss_writer:
+            csv_writer = csv.writer(loss_writer)
+            for row in all_losses:
+                csv_writer.writerow(row)
 
-            epoch_loss = epoch_loss / len(train_data_loader)
-            print('Epoch {}: Training Loss: {:.5f}'.format(
-                epoch, epoch_loss))
+        epoch_loss = epoch_loss / len(train_data_loader)
+        print('Epoch {}: Training Loss: {:.5f}'.format(
+            epoch, epoch_loss))
 
-            # Save model state
-            if epoch == end_epoch or \
-                    epoch % config['save_every'] == 0:
-                torch.save(net.state_dict(), get_model_path(name=epoch))
+        # Save model state
+        if epoch == end_epoch or \
+                epoch % config['save_every'] == 0:
+            torch.save(net.state_dict(), get_model_path(name=epoch))
 
     print('Finished Training')
 

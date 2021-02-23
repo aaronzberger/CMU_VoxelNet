@@ -12,7 +12,7 @@ class VoxelLoss(nn.Module):
     def forward(self, prob_score_map, reg_map,
                 pos_equal_one, neg_equal_one, targets):
         # [BS, 2, X, Y] -> [BS, X, Y, 2]
-        p_pos = torch.sigmoid(prob_score_map.permute(0, 2, 3, 1))
+        p_pos = prob_score_map.permute(0, 2, 3, 1)
 
         # [BS, 14, X, Y] -> [BS, X, Y, 14]
         reg_map = reg_map.permute(0, 2, 3, 1).contiguous()

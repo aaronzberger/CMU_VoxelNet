@@ -5,7 +5,7 @@ import numpy as np
 import sys
 
 from utils import mkdir_p
-from config import data_dir
+from config import base_dir, data_dir
 
 
 def viz_all():
@@ -22,7 +22,7 @@ def viz_all():
 
 def save_center_batch(batch_boxes, batch_lidar, epoch, ids, gt_boxes=None):
     for i in range(batch_boxes.shape[0]):
-        print('output had {} boxes'.format(batch_boxes[i].shape[0]))
+        # print('output had {} boxes'.format(batch_boxes[i].shape[0]))
         boxes = batch_boxes[i]
         save_viz_file(
             boxes=boxes, pointcloud=batch_lidar[i],
@@ -41,12 +41,13 @@ def save_viz_file(boxes, pointcloud, name, desc, gt_boxes):
     '''
     if len(pointcloud.shape) != 2 or pointcloud.shape[1] < 3:
         raise ValueError(
-            'pointcloud argument must be (N,3) or (N,4) array, was of shape', pointcloud.shape)
+            'pointcloud argument must be (N,3) or (N,4) array, was of shape',
+            pointcloud.shape)
     if boxes.shape[1] != 8 or boxes.shape[2] != 3:
         raise ValueError(
             'boxes argument must be (N,8,3) array, was of shape', boxes.shape)
-    mkdir_p(os.path.join(data_dir, 'viz'))
-    np.savez(os.path.join(data_dir, 'viz', name),
+    mkdir_p(os.path.join(base_dir, 'viz'))
+    np.savez(os.path.join(base_dir, 'viz', name),
              boxes=boxes, pointcloud=pointcloud, desc=desc, gt_boxes=gt_boxes)
 
 
@@ -78,7 +79,7 @@ def visualize_lines_3d(boxes, pointcloud, gt_boxes=None):
         line_set.colors = o3d.utility.Vector3dVector(colors)
         line_sets.append(line_set)
 
-    colors = [[0, 0, 1] for _ in range(len(lines))]
+    colors = [[0, 1, 0] for _ in range(len(lines))]
 
     for box in gt_boxes:
         line_set = o3d.geometry.LineSet()
@@ -106,7 +107,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         for item in sys.argv[1:]:
             viz_file = np.load(item)
-            print('Visualizing PointCloud {} from Epoch {}, containing {} ground truth boxes'.format(
+            print('Visualizing PointCloud {} from Epoch {} containing {} ground truth boxes'.format(
                 viz_file['desc'][0], viz_file['desc'][1], len(viz_file['gt_boxes'][0])))
             visualize_lines_3d(boxes=viz_file['boxes'],
                                pointcloud=viz_file['pointcloud'],

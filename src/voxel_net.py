@@ -1,5 +1,4 @@
 import torch.nn as nn
-import torch.nn.functional as F
 import torch
 from utils import load_config, get_num_voxels
 
@@ -8,21 +7,23 @@ config = load_config()
 
 # conv2d + bn + relu
 class Conv2d(nn.Module):
-    def __init__(self, in_channels, out_channels,
-                 k, s, p, activation=True, batch_norm=True):
+    def __init__(self, in_channels, out_channels, k, s, p,
+                 activation=True, batch_norm=True):
         super(Conv2d, self).__init__()
         self.batch_norm = batch_norm
         self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=k, stride=s, padding=p)
-        self.bn = nn.BatchNorm2d(out_channels)
+            in_channels, out_channels, kernel_size=k, stride=s, padding=p
+        )
+        self.batch_norm = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU()
         self.activation = activation
 
     def forward(self, x):
         x = self.conv(x)
         if self.batch_norm:
-            x = self.bn(x)
+            x = self.batch_norm(x)
         if self.activation:
-            x = F.relu(x, inplace=True)
+            x = self.relu(x)
         return x
 
 
@@ -32,56 +33,54 @@ class Conv3d(nn.Module):
         super(Conv3d, self).__init__()
         self.batch_norm = batch_norm
         self.conv = nn.Conv3d(
-            in_channels, out_channels, kernel_size=k, stride=s, padding=p)
-        self.bn = nn.BatchNorm3d(out_channels)
+            in_channels, out_channels, kernel_size=k, stride=s, padding=p
+        )
+        self.batch_norm = nn.BatchNorm3d(out_channels)
+        self.relu = nn.ReLU()
 
     def forward(self, x):
         x = self.conv(x)
         if self.batch_norm:
-            x = self.bn(x)
-        return F.relu(x, inplace=True)
-
-
-# Fully Connected Network
-class FCN(nn.Module):
-
-    def __init__(self, cin, cout):
-        super(FCN, self).__init__()
-        self.cout = cout
-        self.linear = nn.Linear(cin, cout)
-        self.bn = nn.BatchNorm1d(cout)
-
-    def forward(self, x):
-        # KK is the stacked k across batch
-        kk, t, _ = x.shape
-        x = self.linear(x.view(kk * t, -1))
-        x = self.bn(x)
-        x = F.relu(x)
-        return x.view(kk, t, -1)
+            x = self.batch_norm(x)
+        x = self.relu(x)
+        return x
 
 
 # Single Voxel Feature Encoding Layer
 class VFE(nn.Module):
-
-    def __init__(self, cin, cout):
+    def __init__(self, in_channels, out_channels):
         super(VFE, self).__init__()
-        assert cout % 2 == 0
-        self.units = cout // 2
-        self.fcn = FCN(cin, self.units)
+        assert out_channels % 2 == 0
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.units = out_channels // 2
+
+        self.linear = nn.Linear(self.in_channels, self.units)
+        self.relu = nn.ReLU()
+        self.batch_norm = nn.BatchNorm1d(self.units)
 
     def forward(self, x, mask):
-        # point-wise feauture
-        pwf = self.fcn(x)
-        # locally aggregated feature
-        laf = torch.max(pwf, 1)[0].unsqueeze(1).repeat(
-            1, config['max_pts_per_voxel'], 1)
-        # point-wise concat feature
-        pwcf = torch.cat((pwf, laf), dim=2)
-        # apply mask
-        mask = mask.unsqueeze(2).repeat(1, 1, self.units * 2)
-        pwcf = pwcf * mask.float()
+        x = self.linear(x).transpose(1, 2)
+        x = self.relu(x)
+        x = self.batch_norm(x).transpose(1, 2)
 
-        return pwcf
+        # After passing through the Fully Connected Net,
+        # we obtain point-wise features
+
+        # Obtain locally aggregated features through element-wise MaxPool
+        aggregated = torch.max(x, dim=1, keepdim=True)[0]
+
+        # Copy the locally aggregated features so we can concat
+        # it with each point-wise feature
+        repeated = aggregated.expand(-1, config["max_pts_per_voxel"], -1)
+
+        # Concat the point-wise features with the locally aggregated features
+        concat = torch.cat([x, repeated], dim=2)
+
+        mask = mask.expand(-1, -1, self.units * 2)
+        concat = concat * mask.float()
+
+        return concat
 
 
 # Stacked Voxel Feature Encoding
@@ -90,16 +89,18 @@ class SVFE(nn.Module):
         super(SVFE, self).__init__()
         self.vfe_1 = VFE(7, 32)
         self.vfe_2 = VFE(32, 128)
-        self.fcn = FCN(128, 128)
 
     def forward(self, x):
-        mask = torch.ne(torch.max(x, 2)[0], 0)  # ne = not equal
+        # torch.max returns (values, indices), so use the first
+        mask = torch.ne(torch.max(x, dim=2, keepdim=True)[0], 0)
         x = self.vfe_1(x, mask)
         x = self.vfe_2(x, mask)
-        x = self.fcn(x)
-        # element-wise max pooling
-        x = torch.max(x, 1)[0]
-        return x
+
+        # After obtaining point-wise feature representations,
+        # we use element-wise MaxPooling across all voxels get the
+        # locally aggregated feature (See 2.1.1)
+        voxelwise_features = torch.max(x, dim=1)[0]
+        return voxelwise_features
 
 
 # Convolutional Middle Layer
@@ -134,15 +135,24 @@ class RPN(nn.Module):
         self.block_3 = nn.Sequential(*self.block_3)
 
         self.deconv_1 = nn.Sequential(
-            nn.ConvTranspose2d(256, 256, 4, 4, 0), nn.BatchNorm2d(256))
+            nn.ConvTranspose2d(256, 256, 4, 4, 0),
+            nn.BatchNorm2d(256), nn.ReLU()
+        )
         self.deconv_2 = nn.Sequential(
-            nn.ConvTranspose2d(128, 256, 2, 2, 0), nn.BatchNorm2d(256))
-        self.deconv_3 = nn.Sequential(
-            nn.ConvTranspose2d(128, 256, 1, 1, 0), nn.BatchNorm2d(256))
+            nn.ConvTranspose2d(128, 256, 2, 2, 0),
+            nn.BatchNorm2d(256), nn.ReLU()
+        )
 
-        self.prob_map = Conv2d(768, config['anchors_per_position'],
+        # Paper specifies padding as 0, but that gives dimension mismatch error
+        self.deconv_3 = nn.Sequential(
+            nn.ConvTranspose2d(128, 256, 3, 1, 1),
+            nn.BatchNorm2d(256), nn.ReLU()
+        )
+
+        self.prob_map = Conv2d(768, config["anchors_per_position"],
                                1, 1, 0, activation=False, batch_norm=False)
-        self.reg_map = Conv2d(768, 7 * config['anchors_per_position'],
+
+        self.reg_map = Conv2d(768, 7 * config["anchors_per_position"],
                               1, 1, 0, activation=False, batch_norm=False)
 
     def forward(self, x):
@@ -157,7 +167,7 @@ class RPN(nn.Module):
         x_1 = self.deconv_2(block_2_feature_map)
         x_2 = self.deconv_3(block_1_feature_map)
 
-        x = torch.cat((x_0, x_1, x_2), 1)
+        x = torch.cat((x_0, x_1, x_2), dim=1)
 
         # Turn high-res feature map into probability score map and reg map
         return self.prob_map(x), self.reg_map(x)
@@ -181,28 +191,41 @@ class VoxelNet(nn.Module):
     def voxel_indexing(self, sparse_features, coords):
         dim = sparse_features.shape[-1]
 
+        # # This uses the PyTorch Sparse library
+        # sparse = torch.sparse.FloatTensor(
+        #     coords.t(),
+        #     sparse_features,
+        #     torch.Size([config["batch_size"], self.voxel_D,
+        #                 self.voxel_H, sparse_features, dim]),
+        # )
+
+        # dense = sparse.to_dense()
+
+        # return dense
+
         coords = coords.type(torch.LongTensor)
 
-        dense_feature = torch.zeros(dim, config['batch_size'], self.voxel_D,
-                                    self.voxel_H, self.voxel_W).to(self.device)
+        dense_feature = torch.zeros(
+            dim, config["batch_size"], self.voxel_D, self.voxel_H, self.voxel_W
+        ).to(self.device)
 
-        dense_feature[:, coords[:, 0], coords[:, 1],
-                      coords[:, 2], coords[:, 3]] = \
-            sparse_features.transpose(0, 1)
+        dense_feature[
+            :, coords[:, 0], coords[:, 1], coords[:, 2], coords[:, 3]
+        ] = sparse_features.transpose(0, 1)
 
         return dense_feature.transpose(0, 1)
 
     def forward(self, voxel_features, voxel_coords):
-        '''
-            Parameters:
-                voxel_features (arr): (N, X, 7),
-                    where N = number of non-empty voxels,
-                    X = max points per voxel (See T in 2.1.1), and
-                    7 encodes [x,y,z,r,Δx,Δy,Δz]
-                voxel_coords (arr): (N, 4),
-                    where N = number of non-empty voxels and
-                    4 encodes [Number in Batch, X voxel, Y voxel, Z voxel]
-        '''
+        """
+        Parameters:
+            voxel_features (arr): (BS, N, X, 7),
+                where N = number of non-empty voxels,
+                X = max points per voxel (See T in 2.1.1), and
+                7 encodes [x,y,z,r,Δx,Δy,Δz]
+            voxel_coords (arr): (BS, N, 4),
+                where N = number of non-empty voxels and
+                4 encodes [Batch ID, X voxel, Y voxel, Z voxel]
+        """
         # Stacked Voxel Feature Encoding Layers
         vfe_output = self.svfe(voxel_features)
         indexed = self.voxel_indexing(vfe_output, voxel_coords)
@@ -211,9 +234,8 @@ class VoxelNet(nn.Module):
         cml_output = self.cml(indexed)
 
         # Region Proposal Network
-        # merge the depth and feature dim into one,
-        # output probability score map and regression map
         prob_score_map, reg_map = self.rpn(
             cml_output.view(
                 config['batch_size'], -1, self.voxel_H, self.voxel_W))
-        return prob_score_map, reg_map
+
+        return torch.sigmoid(prob_score_map), reg_map

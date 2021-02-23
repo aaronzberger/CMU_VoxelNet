@@ -2,18 +2,16 @@ from __future__ import division
 import os
 import os.path
 import torch.utils.data as data
-import utils
 
 from box_overlaps import bbox_overlaps
 import numpy as np
 import cv2
 
-from utils import load_config, get_num_voxels, get_anchors, load_kitti_label
+from utils import load_config, get_num_voxels, get_anchors
+from utils import load_kitti_label, load_kitti_calib, get_filtered_lidar
 from config import data_dir
-from utils import box3d_corner_to_center_batch, anchors_center_to_corner
-from utils import corner_to_standup_box2d_batch, Timer
-
-timer = Timer()
+from conversions import box3d_corner_to_center_batch, anchors_center_to_corner
+from conversions import corner_to_standup_box2d
 
 
 class KittiDataset(data.Dataset):
@@ -67,8 +65,8 @@ class KittiDataset(data.Dataset):
         anchors_corner = anchors_center_to_corner(self.anchors)
 
         # Convert to from all corners to only 2 [xyxy]
-        anchors_standup_2d = corner_to_standup_box2d_batch(anchors_corner)
-        gt_standup_2d = corner_to_standup_box2d_batch(gt_box3d)
+        anchors_standup_2d = corner_to_standup_box2d(anchors_corner)
+        gt_standup_2d = corner_to_standup_box2d(gt_box3d)
 
         # Calculate IoU of the ground truth and anchors (BEV)
         iou = bbox_overlaps(
@@ -216,7 +214,7 @@ class KittiDataset(data.Dataset):
         image_file = self.image_path + '/' + self.file_list[i] + '.png'
 
         # Load the calibration file and the transform from pcl to image
-        calib = utils.load_kitti_calib(calib_file)
+        calib = load_kitti_calib(calib_file)
         Tr = calib['Tr_velo2cam']
 
         # Load the GT boxes
@@ -227,7 +225,7 @@ class KittiDataset(data.Dataset):
         image = cv2.imread(image_file)
 
         # Crop the lidar
-        lidar, gt_box3d = utils.get_filtered_lidar(lidar, gt_box3d)
+        lidar, gt_box3d = get_filtered_lidar(lidar, gt_box3d)
 
         # visualize_lines_3d(gt_box3d, lidar)
 

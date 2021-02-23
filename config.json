@@ -1,27 +1,24 @@
 {
-    "class_list": ["Car", "Van"],
-
+    "class_list": [
+        "Car"
+    ],
     "batch_size": 1,
     "learning_rate": 0.01,
-    "max_epochs": 100,
-    "save_every": 100,
-    "resume_from": 89,
-    "viz_every": 1,
+    "max_epochs": 250,
+    "save_every": 10,
+    "resume_from": 0,
+    "viz_every": 10,
     "num_viz": 20,
-
     "voxel_loss_params": {
-        "alpha": 1.0,
-        "beta": 1.5
+        "alpha": 1.5,
+        "beta": 1.0
     },
-
     "max_pts_per_voxel": 35,
-
     "voxel_size": {
         "D": 0.4,
         "H": 0.2,
         "W": 0.2
     },
-
     "pcl_range": {
         "X1": 0,
         "X2": 70.4,
@@ -30,12 +27,9 @@
         "Z1": -3,
         "Z2": 1
     },
-
     "IOU_pos_threshold": 0.6,
     "IOU_neg_threshold": 0.45,
-
     "anchors_per_position": 2,
-
     "nms_threshold": 0.1,
     "nms_score_threshold": 0.96
 }
