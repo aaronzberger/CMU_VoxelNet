@@ -108,10 +108,11 @@ def train(device):
                     if progress.n // config['batch_size'] in indices:
                         boxes_corner, boxes_center = ouput_to_boxes(
                             prob_score_map, reg_map)
-                        save_viz_batch(
-                            batch_boxes=boxes_corner,
-                            batch_lidar=lidar, epoch=epoch, ids=ids,
-                            gt_boxes=gt_bounding_boxes)
+                        if boxes_corner is not None:
+                            save_viz_batch(
+                                batch_boxes=boxes_corner,
+                                batch_lidar=lidar, epoch=epoch, ids=ids,
+                                gt_boxes=gt_bounding_boxes)
 
                 progress.set_postfix(
                     **{'loss': '{:.4f}'.format(abs(loss.item()))})

@@ -34,10 +34,10 @@ def visualize_file(np_file):
         np_file['desc'][0], np_file['desc'][1]) +
 
            ' containing  {}  ground truth boxes'.format(
-               len(np_file['gt_boxes'][0])) +
+               np_file['gt_boxes'].shape[1]) +
 
            ' and  {}  predictions'.format(
-               len(np_file['boxes'][0])))
+               np_file['boxes'].shape[0]))
 
     visualize_lines_3d(boxes=np_file['boxes'],
                        pointcloud=np_file['pointcloud'],
@@ -55,7 +55,7 @@ def save_viz_batch(batch_boxes, batch_lidar, epoch, ids, gt_boxes=None):
         ids (arr): list of ids for the viz file
         gt_boxes (arr): ground truth bounding boxes, if desired
     '''
-    for i in range(batch_boxes.shape[0]):
+    for i in range(batch_lidar.shape[0]):
         boxes = batch_boxes[i]
         save_viz_file(
             boxes=boxes, pointcloud=batch_lidar[i],
@@ -129,11 +129,6 @@ def visualize_lines_3d(boxes, pointcloud, gt_boxes=None):
         line_set.lines = o3d.utility.Vector2iVector(lines)
         line_set.colors = o3d.utility.Vector3dVector(colors)
         line_sets.append(line_set)
-
-    # print('PREDICTIONS')
-    # print(boxes)
-    # print('GROUND TRUTH')
-    # print(gt_boxes)
 
     pcl = o3d.geometry.PointCloud()
 
