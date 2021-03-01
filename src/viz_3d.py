@@ -5,6 +5,7 @@ import numpy as np
 import sys
 
 from utils import mkdir_p
+from conversions import load_custom_label
 from config import base_dir
 
 
@@ -88,7 +89,7 @@ def save_viz_file(boxes, pointcloud, name, desc, gt_boxes):
              boxes=boxes, pointcloud=pointcloud, desc=desc, gt_boxes=gt_boxes)
 
 
-def visualize_lines_3d(boxes, pointcloud, gt_boxes=None):
+def visualize_lines_3d(pointcloud, boxes=None, gt_boxes=None):
     '''
     Use Open3D to plot labels on 3D point clouds
 
@@ -96,16 +97,25 @@ def visualize_lines_3d(boxes, pointcloud, gt_boxes=None):
         boxes (arr): boxes in corner notation
         pointcloud (arr): raw pointcloud
     '''
-    gt_boxes = gt_boxes[0]
-    if len(pointcloud.shape) != 2 or pointcloud.shape[1] < 3:
-        raise ValueError(
-            'pointcloud argument must be (N,3) or (N,4) array, was of shape',
-            pointcloud.shape)
+    if isinstance(pointcloud, np.ndarray):
+        if len(pointcloud.shape) != 2 or pointcloud.shape[1] < 3:
+            raise ValueError(
+                'pointcloud must be of shape (N,3) or (N,4), was of shape',
+                pointcloud.shape)
 
-    if boxes.shape[1] != 8 or boxes.shape[2] != 3:
-        raise ValueError(
-            'boxes argument must be (N,8,3) array, was of shape',
-            boxes.shape)
+    if boxes is not None:
+        if boxes.shape[1] != 8 or boxes.shape[2] != 3:
+            raise ValueError(
+                'boxes argument must be (N,8,3) array, was of shape',
+                boxes.shape)
+
+    if len(gt_boxes.shape) == 4:
+        gt_boxes = gt_boxes[0]
+    if gt_boxes is not None:
+        if gt_boxes.shape[1] != 8 or gt_boxes.shape[2] != 3:
+            raise ValueError(
+                'gt_boxes argument must be (N,8,3) array, was of shape',
+                gt_boxes.shape)
 
     lines = [[0, 1], [1, 2], [2, 3], [0, 3],
              [4, 5], [5, 6], [6, 7], [4, 7],
@@ -114,34 +124,62 @@ def visualize_lines_3d(boxes, pointcloud, gt_boxes=None):
     colors = [[1, 0, 0] for _ in range(len(lines))]
 
     line_sets = []
-    for box in boxes:
-        line_set = o3d.geometry.LineSet()
-        line_set.points = o3d.utility.Vector3dVector(box)
-        line_set.lines = o3d.utility.Vector2iVector(lines)
-        line_set.colors = o3d.utility.Vector3dVector(colors)
-        line_sets.append(line_set)
+    if boxes is not None:
+        for box in boxes:
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(box)
+            line_set.lines = o3d.utility.Vector2iVector(lines)
+            line_set.colors = o3d.utility.Vector3dVector(colors)
+            line_sets.append(line_set)
 
-    colors = [[0, 1, 0] for _ in range(len(lines))]
+    colors = [[0, 0, 0] for _ in range(len(lines))]
 
-    for box in gt_boxes:
-        line_set = o3d.geometry.LineSet()
-        line_set.points = o3d.utility.Vector3dVector(box)
-        line_set.lines = o3d.utility.Vector2iVector(lines)
-        line_set.colors = o3d.utility.Vector3dVector(colors)
-        line_sets.append(line_set)
+    if gt_boxes is not None:
+        for box in gt_boxes:
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(box)
+            line_set.lines = o3d.utility.Vector2iVector(lines)
+            line_set.colors = o3d.utility.Vector3dVector(colors)
+            line_sets.append(line_set)
 
-    pcl = o3d.geometry.PointCloud()
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+    vis.get_render_option().load_from_json("/home/aaron/options.json")
 
-    pcl.points = o3d.utility.Vector3dVector(
-        pointcloud[:, :3].astype('float64'))
+    # print(gt_boxes)
+    print(len(gt_boxes))
 
-    o3d.visualization.draw_geometries([
-        pcl, *line_sets
-    ])
+    if isinstance(pointcloud, np.ndarray):
+        pcl = o3d.geometry.PointCloud()
+
+        pcl.points = o3d.utility.Vector3dVector(
+            pointcloud[:, :3].astype('float64'))
+    else:
+        pcl = pointcloud
+
+    vis.add_geometry(pcl)
+    for tree in line_sets:
+        vis.add_geometry(tree)
+    vis.run()
+    vis.destroy_window()
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
+    if sys.argv[1] not in ['all', 'these', 'custom']:
+        raise ValueError('''
+    First argument must be either \'all\', \'these\', or \'custom\'.
+
+    all: visualize all point clouds and boxes in the folder {}
+    these: the next arguments should be individual paths to viz files
+        (probably in the folder {})
+    custom: the next arguments should be a point cloud file and labels file
+    '''.format(os.path.join(base_dir, 'viz'), os.path.join(base_dir, 'viz'), ))
+
+    if sys.argv[1] == 'custom':
+        cloud = o3d.io.read_point_cloud(sys.argv[1])
+        labels = load_custom_label(sys.argv[2])
+        visualize_lines_3d(pointcloud=cloud, gt_boxes=labels)
+    elif sys.argv[1] == 'these':
         for item in sys.argv[1:]:
             viz_file = np.load(item)
             visualize_file(viz_file)

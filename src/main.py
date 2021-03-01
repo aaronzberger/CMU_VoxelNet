@@ -107,7 +107,7 @@ def train(device):
                 with torch.no_grad():
                     if progress.n // config['batch_size'] in indices:
                         boxes_corner, boxes_center = ouput_to_boxes(
-                            prob_score_map, reg_map)
+                            pos_equal_one, targets)
                         if boxes_corner is not None:
                             save_viz_batch(
                                 batch_boxes=boxes_corner,

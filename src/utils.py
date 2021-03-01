@@ -10,15 +10,16 @@ import numpy as np
 from config import base_dir
 
 
-def load_config():
+def load_config(config_name=None):
     '''
     Load the configuration file
 
     Returns:
         config (dict): Python dictionary of hyperparameter name-value pairs
     '''
-
-    path = os.path.join(base_dir, 'config.json')
+    if config_name is None:
+        config_name = 'config'
+    path = os.path.join(base_dir, '{}.json'.format(config_name))
 
     with open(path) as file:
         config = json.load(file)

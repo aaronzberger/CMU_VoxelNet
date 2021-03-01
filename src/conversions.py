@@ -5,13 +5,15 @@ from utils import get_anchors, load_config
 from nms import nms
 
 
-def box3d_center_to_corner(boxes_center):
+def box3d_center_to_corner(boxes_center, z_middle=False):
     '''
     Transform bounding boxes from center to corner notation
 
     Parameters:
-        boxes_center (arr): (N, X, 7):
-            boxes in center notation
+        boxes_center (arr): (X, 7):
+            boxes in center notation [xyzhwlr]
+        z_middle (bool): whether the z in boxes_center is at the middle of
+            the object (it's normally at the bottom for KITTI labels)
 
     Returns:
         arr: bounding box in corner notation
@@ -34,6 +36,8 @@ def box3d_center_to_corner(boxes_center):
             [-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
             [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
             [0, 0, 0, 0, h, h, h, h]])
+        if z_middle:
+            bounding_box[2] = [-h/2, -h/2, -h/2, -h/2, h/2, h/2, h/2, h/2]
 
         # re-create 3D bounding box in velodyne coordinate system
         yaw = rotation[2]
@@ -53,6 +57,57 @@ def box3d_center_to_corner(boxes_center):
         corner_boxes[box_num] = box3d
 
     return corner_boxes
+
+
+def load_custom_label(label_file):
+    '''
+    Load the custom label file for an example
+
+    Parameters:
+        label_file (str): label file full path
+
+    Returns:
+        arr: array containing GT boxes in the corner notation
+    '''
+    config = load_config('config_prim')
+
+    with open(label_file, 'r') as f:
+        lines = f.readlines()
+
+    gt_boxes3d_corner = []
+
+    for j in range(len(lines)):
+        obj = lines[j].strip().split(' ')
+
+        # Ensure the GT class is one we're using
+        if obj[0].strip() not in config['class_list']:
+            continue
+
+        h, w, l, tx, ty, tz, ry = [float(i) for i in obj[1:]]
+        tx, ty, tz, w, l, h, ry = [float(i) for i in obj[1:]]
+
+        box = np.expand_dims(np.array([tx, ty, tz, h, w, l, ry]), axis=0)
+
+        # Transform label into coordinates of 8 points that make up the bbox
+        box3d_corner = box3d_center_to_corner(box, z_middle=True)
+
+        # Since trunks always start at the ground,
+        # make the lesser Z height of all bounding boxes 0
+        lesser = None
+        for coord in box3d_corner[0]:
+            if lesser is None:
+                lesser = coord[2]
+            elif coord[2] < lesser:
+                lesser = coord[2]
+        for coord in box3d_corner[0]:
+            if coord[2] == lesser:
+                coord[2] = 0
+
+        gt_boxes3d_corner.append(box3d_corner)
+
+    gt_boxes3d_corner = np.array(gt_boxes3d_corner).reshape(-1, 8, 3)
+
+    return gt_boxes3d_corner
 
 
 def box3d_center_to_corner_batch(boxes_center):
