@@ -12,7 +12,7 @@ from config import base_dir
 
 def load_config(config_name=None):
     '''
-    Load the configuration file
+    Load the configuration json file
 
     Returns:
         config (dict): Python dictionary of hyperparameter name-value pairs
@@ -27,12 +27,28 @@ def load_config(config_name=None):
     return config
 
 
-def get_model_path(name):
+def mkdir_p(path):
     '''
-    Get the path to save the state_dict
+    Create a directory at a given path if it does not already exist
 
     Parameters:
-        name (any): name of the epoch (can be a number or a token)
+        path (string): the full os.path location for the directory
+    '''
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
+
+
+def get_model_path(name):
+    '''
+    Get the path to save the model dict
+
+    Parameters:
+        name (any): name of the epoch (can be a number or token)
     '''
     config = load_config()
     save_dir = os.path.join(base_dir, 'save')
@@ -109,9 +125,9 @@ def get_anchors():
     return np.stack([cx, cy, cz, height, width, length, rotation], axis=-1)
 
 
-def get_filtered_lidar(lidar, boxes3d=None):
+def filter_pointcloud(lidar, boxes3d=None, config=None):
     '''
-    Crop a lidar pointcloud to the dimensions specified in config
+    Crop a lidar pointcloud to the dimensions specified in config json
 
     Parameters:
         lidar (arr): the point cloud
@@ -121,7 +137,7 @@ def get_filtered_lidar(lidar, boxes3d=None):
         arr: cropped point cloud
         arr: cropped ground truth boxes
     '''
-    config = load_config()
+    config = load_config(config)
 
     x_pts = lidar[:, 0]
     y_pts = lidar[:, 1]
@@ -218,31 +234,35 @@ def box3d_cam_to_velo(box3d, Tr=None):
     h, w, l, tx, ty, tz, ry = [float(i) for i in box3d]
 
     # Position in labels are in cam coordinates. Transform to lidar coords
-    cam = np.ones([4, 1])
-    cam[0] = tx
-    cam[1] = ty
-    cam[2] = tz
-    t_lidar = project_cam2velo(cam, Tr)
+    cam = np.expand_dims(np.array([tx, ty, tz, 1]), 1)
+    translation = project_cam2velo(cam, Tr)
 
-    bounding_box = np.array([[-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
-                             [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
-                             [0, 0, 0, 0, h, h, h, h]])
+    # Very similar code as in box3d_center_to_corner in conversions.py
+    # Create the bounding box outline (to be transposed)
+    bounding_box = np.array([
+        [-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
+        [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
+        [0, 0, 0, 0, h, h, h, h]])
 
-    rz = ry_to_rz(ry)
+    rotation = ry_to_rz(ry)
 
+    # Standard 3x3 rotation matrix around the Z axis
     rotation_matrix = np.array([
-        [np.cos(rz), -np.sin(rz), 0.0],
-        [np.sin(rz), np.cos(rz), 0.0],
+        [np.cos(rotation), -np.sin(rotation), 0.0],
+        [np.sin(rotation), np.cos(rotation), 0.0],
         [0.0, 0.0, 1.0]])
 
-    eight_points = np.tile(t_lidar, (8, 1))
+    # Repeat [x, y, z] eight times
+    eight_points = np.tile(translation, (8, 1))
 
-    cornerPosInVelo = np.dot(
+    # Translate the rotated bounding box by the
+    # original center position to obtain the final box
+    corner_box = np.dot(
         rotation_matrix, bounding_box) + eight_points.transpose()
 
-    box3d_corner = cornerPosInVelo.transpose()
+    corner_box = corner_box.transpose()
 
-    return box3d_corner.astype(np.float32)
+    return corner_box.astype(np.float32)
 
 
 def load_kitti_label(label_file, Tr):
@@ -280,28 +300,11 @@ def load_kitti_label(label_file, Tr):
     return gt_boxes3d_corner
 
 
-def mkdir_p(path):
-    '''
-    Create a directory at a given path if it does not already exist
-
-    Parameters:
-        path (string): the full os.path location for the directory
-    '''
-    try:
-        os.makedirs(path)
-    except OSError as exc:
-        if exc.errno == errno.EEXIST and os.path.isdir(path):
-            pass
-        else:
-            raise
-
-
 class Timer:
     '''
     Simple timer class to keep track of mutliple running timers.
     Just used for debugging.
     '''
-
     def __init__(self, num=10):
         self.timers = [time.time()] * num
 

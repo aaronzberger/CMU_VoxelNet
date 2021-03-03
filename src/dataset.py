@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 
 from utils import load_config, get_num_voxels, get_anchors
-from utils import load_kitti_label, load_kitti_calib, get_filtered_lidar
+from utils import load_kitti_label, load_kitti_calib, filter_pointcloud
 from config import data_dir
 from conversions import box3d_corner_to_center_batch, anchors_center_to_corner
 from conversions import corner_to_standup_box2d
@@ -225,7 +225,7 @@ class KittiDataset(data.Dataset):
         image = cv2.imread(image_file)
 
         # Crop the lidar
-        lidar, gt_box3d = get_filtered_lidar(lidar, gt_box3d)
+        lidar, gt_box3d = filter_pointcloud(lidar, gt_box3d)
 
         # visualize_lines_3d(gt_box3d, lidar)
 

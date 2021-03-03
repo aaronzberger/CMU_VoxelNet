@@ -34,7 +34,8 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
     try:
         idx = idx[-top_k:]  # indices of the top-k largest boxes
     except IndexError:
-        print("Unable to select the {} top values from these indices".format(top_k))
+        print("Unable to select the {} top values from these indices".format(
+            top_k))
         return keep, count
     xx1 = boxes.new()
     yy1 = boxes.new()

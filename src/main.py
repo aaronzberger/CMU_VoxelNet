@@ -1,20 +1,29 @@
-from dataset import get_data_loader
-from voxel_net import VoxelNet
+
 import argparse
-import torch
-from utils import load_config, get_model_path, mkdir_p
-from conversions import ouput_to_boxes
-from torch.utils.tensorboard import SummaryWriter
-from viz_3d import save_viz_batch
-from voxel_loss import VoxelLoss
-from tqdm import tqdm
-import numpy as np
 import csv
 import os
+
+import numpy as np
+import torch
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
 from config import base_dir
+from conversions import ouput_to_boxes
+from dataset import get_data_loader
+from utils import load_config, get_model_path, mkdir_p
+from viz_3d import save_viz_batch
+from voxel_loss import VoxelLoss
+from voxel_net import VoxelNet
 
 
 def build_model(device):
+    '''
+    Setup the model, loss function, optimizer, and scheduler
+
+    Parameters:
+        device (torch.device): device to put everything on
+    '''
     config = load_config()
     net = VoxelNet(device)
     net = net.to(device)
@@ -30,15 +39,24 @@ def build_model(device):
 
 
 def train(device):
+    '''
+    Train the network
+
+    Parameters:
+        device (torch.device): device to put everything on
+    '''
+    # Setup the Tensorboard logger
     mkdir_p(os.path.join(base_dir, 'log'))
     writer = SummaryWriter(log_dir=os.path.join(base_dir, 'log'))
     writer_counter = 0
+
     config = load_config()
     net, loss_fn, optimizer, scheduler = build_model(device)
 
+    # Get the data from dataset.py
     train_data_loader, num_train = get_data_loader()
 
-    # Resume training if needed
+    # Resume training from a certain epoch if specified in config json file
     if config['resume_from'] != 0:
         start_epoch = config['resume_from']
         saved_ckpt_path = get_model_path(start_epoch)
@@ -54,6 +72,8 @@ def train(device):
     all_losses = []
 
     for epoch in range(start_epoch, end_epoch):
+        # Specify indices in this epoch that will be visualized, as specified
+        # in the config json file params
         if epoch % config['viz_every'] == 0:
             indices = np.random.choice(
                 np.arange(len(train_data_loader) // config['batch_size']),
@@ -65,6 +85,7 @@ def train(device):
         epoch_losses = []
         net.train()
 
+        # Progress bar for each epoch
         with tqdm(total=num_train, desc='Epoch %s/%s' % (epoch, end_epoch),
                   unit='pointclouds', leave=False, colour='green') as progress:
 
@@ -74,16 +95,17 @@ def train(device):
 
                 optimizer.zero_grad()
 
-                # Forward Prop
                 voxel_features = torch.Tensor(voxel_features).to(device)
                 voxel_coords = torch.Tensor(voxel_coords).to(device)
+
+                # Pass through the network
                 prob_score_map, reg_map = net(voxel_features, voxel_coords)
 
                 pos_equal_one = torch.Tensor(pos_equal_one).to(device)
                 neg_equal_one = torch.Tensor(neg_equal_one).to(device)
                 targets = torch.Tensor(targets).to(device)
 
-                # Loss
+                # Calculate loss
                 loss, conf_loss, reg_loss = loss_fn(
                     prob_score_map, reg_map,
                     pos_equal_one, neg_equal_one, targets)
@@ -91,38 +113,40 @@ def train(device):
                 loss.backward()
                 optimizer.step()
 
+                # Add loss info to the Tensorboard logger
                 writer.add_scalars(
                     main_tag="training",
                     tag_scalar_dict={
                         "loss": loss.item(),
                         "conf_loss": conf_loss.item(),
                         "reg_loss": reg_loss.item(),
-                    }, global_step=writer_counter
-                )
-
+                    }, global_step=writer_counter)
                 writer_counter += 1
 
-                epoch_losses.append(loss.item())
-
+                # Visualize this image
                 with torch.no_grad():
                     if progress.n // config['batch_size'] in indices:
+                        # Convert VoxelNet output to bounding boxes
                         boxes_corner, boxes_center = ouput_to_boxes(
-                            pos_equal_one, targets)
+                            prob_score_map, reg_map)
                         if boxes_corner is not None:
+                            # Save the bounding boxes to a file (viz folder)
                             save_viz_batch(
-                                batch_boxes=boxes_corner,
-                                batch_lidar=lidar, epoch=epoch, ids=ids,
-                                gt_boxes=gt_bounding_boxes)
+                                pointcloud=lidar, boxes=boxes_corner,
+                                gt_boxes=gt_bounding_boxes,
+                                epoch=epoch, ids=ids)
 
+                # Update progress bar
                 progress.set_postfix(
                     **{'loss': '{:.4f}'.format(abs(loss.item()))})
-
-                epoch_loss += loss
-
                 progress.update(config['batch_size'])
+
+                epoch_losses.append(loss.item())
+                epoch_loss += loss
 
         all_losses.append(epoch_losses)
 
+        # Write a new csv file containing all epoch losses
         with open('/home/aaron/losses.csv', 'w') as loss_writer:
             csv_writer = csv.writer(loss_writer)
             for row in all_losses:
@@ -132,7 +156,7 @@ def train(device):
         print('Epoch {}: Training Loss: {:.5f}'.format(
             epoch, epoch_loss))
 
-        # Save model state
+        # Save model dict as specified by params in config json
         if epoch == end_epoch or \
                 epoch % config['save_every'] == 0:
             torch.save(net.state_dict(), get_model_path(name=epoch))
@@ -154,5 +178,5 @@ if __name__ == '__main__':
 
     if args.mode == 'train':
         train(device)
-    if args.mode == 'test':
+    else:
         raise NotImplementedError()

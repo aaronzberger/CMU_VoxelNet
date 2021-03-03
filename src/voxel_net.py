@@ -189,6 +189,19 @@ class VoxelNet(nn.Module):
         self.apply(init_weights)
 
     def voxel_indexing(self, sparse_features, coords):
+        '''
+        More than 90% of voxels are empty, so in the Voxel Feature Encoding
+        Layers, we use sparse tensor format. Now, we have to convert back
+        for the CML and RPN.
+
+        See 2.1.1: Sparse Tensor Representation
+
+        Parameters:
+            sparse_features (arr): output from the SVFE
+            coords (arr): the coordinates of the non-empty voxels so we
+                can put the sparse features into the correct places in the
+                new dense tensor
+        '''
         dim = sparse_features.shape[-1]
 
         # # This uses the PyTorch Sparse library

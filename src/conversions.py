@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 
-from utils import get_anchors, load_config
 from nms import nms
+from utils import get_anchors, load_config
 
 
 def box3d_center_to_corner(boxes_center, z_middle=False):
@@ -28,10 +28,10 @@ def box3d_center_to_corner(boxes_center, z_middle=False):
 
     for box_num, box in enumerate(boxes_center):
         translation = box[0:3]
-        size = box[3:6]
-        rotation = [0, 0, box[-1]]
+        h, w, l = box[3], box[4], box[5]
+        rotation = box[6]
 
-        h, w, l = size[0], size[1], size[2]
+        # Create the bounding box outline (to be transposed)
         bounding_box = np.array([
             [-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
             [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
@@ -39,22 +39,49 @@ def box3d_center_to_corner(boxes_center, z_middle=False):
         if z_middle:
             bounding_box[2] = [-h/2, -h/2, -h/2, -h/2, h/2, h/2, h/2, h/2]
 
-        # re-create 3D bounding box in velodyne coordinate system
-        yaw = rotation[2]
+        # Standard 3x3 rotation matrix around the Z axis
         rotation_matrix = np.array([
-            [np.cos(yaw), -np.sin(yaw), 0.0],
-            [np.sin(yaw), np.cos(yaw), 0.0],
+            [np.cos(rotation), -np.sin(rotation), 0.0],
+            [np.sin(rotation), np.cos(rotation), 0.0],
             [0.0, 0.0, 1.0]])
 
-        # Just repeat [x, y, z] eight times
+        # Repeat [x, y, z] eight times
         eight_points = np.tile(translation, (8, 1))
 
-        # Add rotated bounding box to the center position to obtain corners
-        cornerPosInVelo = np.dot(
+        # Translate the rotated bounding box by the
+        # original center position to obtain the final box
+        corner_box = np.dot(
             rotation_matrix, bounding_box) + eight_points.transpose()
-        box3d = cornerPosInVelo.transpose()
+        corner_box = corner_box.transpose()
 
-        corner_boxes[box_num] = box3d
+        corner_boxes[box_num] = corner_box
+
+    return corner_boxes
+
+
+def box3d_center_to_corner_batch(boxes_center):
+    '''
+    Transform bounding boxes from center to corner notation
+    by calling the box3d_center_to_corner method over the batch
+
+    Parameters:
+        boxes_center (arr): (N, X, 7):
+            boxes in center notation
+
+    Returns:
+        arr: bounding box in corner notation
+    '''
+    if torch.is_tensor(boxes_center):
+        if boxes_center.is_cuda:
+            boxes_center = boxes_center.cpu().numpy()
+    batch_size = boxes_center.shape[0]
+    num_boxes = boxes_center.shape[1]
+
+    # To return
+    corner_boxes = np.zeros((batch_size, num_boxes, 8, 3))
+
+    for batch_id in range(batch_size):
+        corner_boxes[batch_id] = box3d_center_to_corner(boxes_center[batch_id])
 
     return corner_boxes
 
@@ -110,60 +137,6 @@ def load_custom_label(label_file):
     return gt_boxes3d_corner
 
 
-def box3d_center_to_corner_batch(boxes_center):
-    '''
-    Transform bounding boxes from center to corner notation
-
-    Parameters:
-        boxes_center (arr): (N, X, 7):
-            boxes in center notation
-
-    Returns:
-        arr: bounding box in corner notation
-    '''
-    if torch.is_tensor(boxes_center):
-        if boxes_center.is_cuda:
-            boxes_center = boxes_center.cpu().numpy()
-    batch_size = boxes_center.shape[0]
-    num_boxes = boxes_center.shape[1]
-
-    # To return
-    corner_boxes = np.zeros((batch_size, num_boxes, 8, 3))
-
-    for batch_id in range(batch_size):
-        boxes = boxes_center[batch_id]
-
-        for box_num, box in enumerate(boxes):
-            translation = box[0:3]
-            size = box[3:6]
-            rotation = [0, 0, box[-1]]
-
-            h, w, l = size[0], size[1], size[2]
-            bounding_box = np.array([
-                [-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
-                [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
-                [0, 0, 0, 0, h, h, h, h]])
-
-            # re-create 3D bounding box in velodyne coordinate system
-            yaw = rotation[2]
-            rotation_matrix = np.array([
-                [np.cos(yaw), -np.sin(yaw), 0.0],
-                [np.sin(yaw), np.cos(yaw), 0.0],
-                [0.0, 0.0, 1.0]])
-
-            # Just repeat [x, y, z] eight times
-            eight_points = np.tile(translation, (8, 1))
-
-            # Add rotated bounding box to the center position to obtain corners
-            cornerPosInVelo = np.dot(
-                rotation_matrix, bounding_box) + eight_points.transpose()
-            box3d = cornerPosInVelo.transpose()
-
-            corner_boxes[batch_id][box_num] = box3d
-
-    return corner_boxes
-
-
 def anchors_center_to_corner(anchors):
     '''
     Convert anchors to corner notation (BEV only)
@@ -182,7 +155,7 @@ def anchors_center_to_corner(anchors):
     for i in range(N):
         anchor = anchors[i]
         h, w, l = anchor[3:6]
-        rz = anchor[-1]
+        rotation = anchor[6]
 
         bounding_box = np.array([
             [-l/2, -l/2, l/2, l/2],
@@ -190,18 +163,20 @@ def anchors_center_to_corner(anchors):
 
         # re-create 3D bounding box in velodyne frame
         rotation_matrix = np.array([
-            [np.cos(rz), -np.sin(rz)],
-            [np.sin(rz), np.cos(rz)]])
+            [np.cos(rotation), -np.sin(rotation)],
+            [np.sin(rotation), np.cos(rotation)]])
 
+        # Repeat [x, y] 4 times
         four_points = np.tile(anchor[:2], (4, 1))
 
-        # Add rotation matrix to (2, 4) of Xs, then Ys
-        cornerPosInVelo = np.dot(rotation_matrix, bounding_box) + \
+        # Translate the rotated bounding box by the
+        # original center position to obtain the final box
+        corner_box = np.dot(rotation_matrix, bounding_box) + \
             four_points.transpose()
 
-        # [XXXX,YYYY] -> [XY,XY,XY,XY]
-        box2d = cornerPosInVelo.transpose()
-        anchors_corner[i] = box2d
+        # [XXXX, YYYY] -> [XY, XY, XY, XY]
+        corner_box = corner_box.transpose()
+        anchors_corner[i] = corner_box
 
     return anchors_corner
 
@@ -256,7 +231,7 @@ def box3d_corner_to_center_batch(box3d_corner):
     xyz = np.mean(box3d_corner[:, :4, :], axis=1)
 
     #     2―――――1       2―――――1
-    #    / top /|      /|     |     -> which points the elements of the input
+    #    / top /|      /| bck |     -> which points the elements of the input
     #   3―――――0 |     3 |     |        array refer to in the bounding box,
     #   |     | 5     | 6―――――5        by index
     #   |     |/      |/ bot /
@@ -345,77 +320,6 @@ def delta_to_boxes3d(deltas, anchors):
     boxes3d[..., 6] = deltas[..., 6] + anchors_reshaped[..., 6]
 
     return boxes3d
-
-
-def draw_targets(pos_equal_one, targets):
-    config = load_config()
-
-    # View as list of positive anchors
-    pos_equal_one = pos_equal_one.view(config['batch_size'], -1)
-    print('pos anchors', pos_equal_one.shape)
-
-    # Convert target deltas to actual bounding boxes
-    batch_boxes3d = delta_to_boxes3d(targets, get_anchors())
-    print('batch boxes 3d', batch_boxes3d.shape)
-
-    # Only use predictions where the prediction was > threshold
-    mask = torch.eq(pos_equal_one, 1)
-    mask = torch.gt(pos_equal_one,
-                    config['nms_score_threshold'])
-    print(torch.nonzero(mask).shape)
-
-    mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
-
-    nonzero = torch.nonzero(mask).shape[0]
-    print('nonzero', nonzero)
-    boxes_center = torch.zeros((config['batch_size'], nonzero, 7))
-    print('return boxes', boxes_center.shape)
-
-    for batch_id in range(config['batch_size']):
-        boxes3d = torch.masked_select(
-            batch_boxes3d[batch_id], mask_reg[batch_id]).view(-1, 7)
-
-        boxes_center[batch_id] = boxes3d
-
-    # Convert the final boxes from center [xyzhwlr] to corner points notation
-    boxes_corner = box3d_center_to_corner_batch(boxes_center)
-    print('boxes corner', boxes_corner.shape)
-
-    return boxes_corner, boxes_center
-
-
-def draw_boxes(reg_map, prob_score_map):
-    config = load_config()
-
-    # View as list of anchors
-    prob_score_map = prob_score_map.view(config['batch_size'], -1)
-
-    # Convert regression map deltas to actual bounding boxes
-    batch_boxes3d = delta_to_boxes3d(reg_map, get_anchors())
-
-    # Only use predictions where the prediction was > threshold
-    mask = torch.gt(prob_score_map,
-                    config['nms_score_threshold'])
-
-    mask_reg = mask.unsqueeze(2).repeat(1, 1, 7)
-
-    nonzero = torch.nonzero(mask).shape[0]
-    return_boxes = torch.zeros((config['batch_size'], nonzero, 7))
-    return_scores = torch.zeros((config['batch_size'], nonzero))
-
-    for batch_id in range(config['batch_size']):
-        boxes3d = torch.masked_select(
-            batch_boxes3d[batch_id], mask_reg[batch_id]).view(-1, 7)
-        scores = torch.masked_select(
-            prob_score_map[batch_id], mask[batch_id])
-
-        return_boxes[batch_id] = boxes3d
-        return_scores[batch_id] = scores
-
-    # Convert the final boxes from center [xyzhwlr] to corner points notation
-    boxes_corner = box3d_center_to_corner_batch(return_boxes)
-
-    return boxes_corner, return_boxes, return_scores
 
 
 def ouput_to_boxes(prob_score_map, reg_map):
