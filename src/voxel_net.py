@@ -32,47 +32,6 @@ class FCN(nn.Module):
         return x
 
 
-# conv2d + bn + relu
-class Conv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, k, s, p,
-                 activation=True, batch_norm=True):
-        super(Conv2d, self).__init__()
-        self.batch_norm = batch_norm
-        self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=k, stride=s, padding=p
-        )
-        self.batch_norm = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
-        self.activation = activation
-
-    def forward(self, x):
-        x = self.conv(x)
-        if self.batch_norm:
-            x = self.batch_norm(x)
-        if self.activation:
-            x = self.relu(x)
-        return x
-
-
-# conv3d + bn + relu
-class Conv3d(nn.Module):
-    def __init__(self, in_channels, out_channels, k, s, p, batch_norm=True):
-        super(Conv3d, self).__init__()
-        self.batch_norm = batch_norm
-        self.conv = nn.Conv3d(
-            in_channels, out_channels, kernel_size=k, stride=s, padding=p
-        )
-        self.batch_norm = nn.BatchNorm3d(out_channels)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.conv(x)
-        if self.batch_norm:
-            x = self.batch_norm(x)
-        x = self.relu(x)
-        return x
-
-
 # Single Voxel Feature Encoding Layer
 class VFE(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -133,6 +92,48 @@ class SVFE(nn.Module):
         return voxelwise_features
 
 
+class Conv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, k, s, p,
+                 activation=True, batch_norm=True):
+        super(Conv2d, self).__init__()
+        self.activation = activation
+        self.batch_norm = batch_norm
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size=k, stride=s, padding=p
+        )
+
+        # After each convolution layer, BN and ReLU operations are applied
+        # (2.1.3 Regional Proposal Network).
+        self.batch_norm = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.batch_norm:
+            x = self.batch_norm(x)
+        if self.activation:
+            x = self.relu(x)
+        return x
+
+
+class Conv3d(nn.Module):
+    def __init__(self, in_channels, out_channels, k, s, p):
+        super(Conv3d, self).__init__()
+        # Each convolutional middle layer applies 3D convolution, BN layer,
+        # and ReLU layer sequentially (2.1.2 Convolutional Middle Layers).
+        self.conv = nn.Conv3d(
+            in_channels, out_channels, kernel_size=k, stride=s, padding=p
+        )
+        self.batch_norm = nn.BatchNorm3d(out_channels)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.batch_norm(x)
+        x = self.relu(x)
+        return x
+
+
 # Convolutional Middle Layer
 class CML(nn.Module):
     def __init__(self):
@@ -145,6 +146,24 @@ class CML(nn.Module):
         x = self.conv3d_1(x)
         x = self.conv3d_2(x)
         x = self.conv3d_3(x)
+        return x
+
+
+class Deconv2D(nn.Module):
+    def __init__(self, in_channels, out_channels, k, s, p):
+        super(Deconv2D, self).__init__()
+        self.deconv = nn.ConvTranspose2d(in_channels, out_channels, k, s, p)
+        self.batch_norm = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU()
+
+    def forward(self, x, output_size=None):
+        if output_size is None:
+            x = self.deconv(x)
+        else:
+            x = self.deconv(x, output_size=output_size)
+        x = self.batch_norm(x)
+        x = self.relu(x)
+
         return x
 
 
@@ -161,23 +180,16 @@ class RPN(nn.Module):
         self.block_2 = nn.Sequential(*self.block_2)
 
         self.block_3 = [Conv2d(128, 256, 3, 2, 1)]
-        self.block_3 += [nn.Conv2d(256, 256, 3, 1, 1) for _ in range(5)]
+        self.block_3 += [Conv2d(256, 256, 3, 1, 1) for _ in range(5)]
         self.block_3 = nn.Sequential(*self.block_3)
 
-        self.deconv_1 = nn.Sequential(
-            nn.ConvTranspose2d(256, 256, 4, 4, 0),
-            nn.BatchNorm2d(256), nn.ReLU()
-        )
-        self.deconv_2 = nn.Sequential(
-            nn.ConvTranspose2d(128, 256, 2, 2, 0),
-            nn.BatchNorm2d(256), nn.ReLU()
-        )
+        self.deconv_1 = Deconv2D(256, 256, 4, 4, 0)
+        self.deconv_2 = Deconv2D(128, 256, 2, 2, 0)
 
-        # Paper specifies padding as 0, but that gives dimension mismatch error
-        self.deconv_3 = nn.Sequential(
-            nn.ConvTranspose2d(128, 256, 3, 1, 1),
-            nn.BatchNorm2d(256), nn.ReLU()
-        )
+        # WARNING:
+        # Paper specifies (3, 1, 0), which gives an invalid shape as output,
+        # we can either use (1, 1, 0) or (3, 1, 1)
+        self.deconv_3 = Deconv2D(128, 256, 1, 1, 0)
 
         self.prob_map = Conv2d(768, config["anchors_per_position"],
                                1, 1, 0, activation=False, batch_norm=False)
@@ -192,14 +204,16 @@ class RPN(nn.Module):
         block_2_feature_map = x
         x = self.block_3(x)
 
-        # Deconv output of each block to concat into high-res feature map
+        # Upsample the output of every block to a fixed size (2.1.3)
         x_0 = self.deconv_1(x)
         x_1 = self.deconv_2(block_2_feature_map)
         x_2 = self.deconv_3(block_1_feature_map)
 
+        # Concatanate to construct the high resolution feature map (2.1.3)
         x = torch.cat((x_0, x_1, x_2), dim=1)
 
-        # Turn high-res feature map into probability score map and reg map
+        # This feature map is mapped to the desired learning targets:
+        # (1) a probability score map and (2) a regression map (2.1.3).
         return self.prob_map(x), self.reg_map(x)
 
 
@@ -220,43 +234,36 @@ class VoxelNet(nn.Module):
 
     def voxel_indexing(self, sparse_features, coords):
         '''
-        More than 90% of voxels are empty, so in the Voxel Feature Encoding
-        Layers, we use sparse tensor format. Now, we have to convert back
-        for the CML and RPN.
+        The obtained list of voxel-wise features can be represented as a
+        sparse 4D tensor, of size C×D×H×W
 
-        See 2.1.1: Sparse Tensor Representation
+        (2.1.1 Sparse Tensor Representation)
 
         Parameters:
-            sparse_features (arr): output from the SVFE
-            coords (arr): the coordinates of the non-empty voxels so we
+            sparse_features (arr): (X, 128) output from the SVFE
+            coords (arr): (X, 4) the coordinates of the non-empty voxels so we
                 can put the sparse features into the correct places in the
                 new dense tensor
         '''
         dim = sparse_features.shape[-1]
-
-        # # This uses the PyTorch Sparse library
-        # sparse = torch.sparse.FloatTensor(
-        #     coords.t(),
-        #     sparse_features,
-        #     torch.Size([config["batch_size"], self.voxel_D,
-        #                 self.voxel_H, sparse_features, dim]),
-        # )
-
-        # dense = sparse.to_dense()
-
-        # return dense
-
         coords = coords.type(torch.LongTensor)
 
-        dense_feature = torch.zeros(
-            dim, config["batch_size"], self.voxel_D, self.voxel_H, self.voxel_W
-        ).to(self.device)
+        if coords.device == torch.device('cpu'):
+            coords = coords.to(self.device)
 
-        dense_feature[
-            :, coords[:, 0], coords[:, 1], coords[:, 2], coords[:, 3]
-        ] = sparse_features.transpose(0, 1)
+        # Indices should have shape (sparse_dim, nonzero),
+        # and values should have shape (nonzero, :)
+        sparse = torch.sparse.FloatTensor(
+            coords.t(),
+            sparse_features,
+            torch.Size([config["batch_size"], self.voxel_D,
+                        self.voxel_H, self.voxel_W, dim]),
+        )
 
-        return dense_feature.transpose(0, 1)
+        # [BS, D, H, W, 128] -> [BS, 128, D, H, W]
+        dense = sparse.to_dense().permute(0, 4, 1, 2, 3)
+
+        return dense
 
     def forward(self, voxel_features, voxel_coords):
         """
@@ -271,6 +278,8 @@ class VoxelNet(nn.Module):
         """
         # Stacked Voxel Feature Encoding Layers
         vfe_output = self.svfe(voxel_features)
+
+        # [X, 128] -> [BS, 128, D, H, W]
         indexed = self.voxel_indexing(vfe_output, voxel_coords)
 
         # Convolutional Middle Layer
