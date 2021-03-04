@@ -161,14 +161,21 @@ class KittiDataset(data.Dataset):
 
     def voxelize(self, lidar):
         '''
-        Convert an input point cloud into a voxelized point cloud
+        Convert a point cloud to a voxelized grid
 
         Parameters:
             lidar (arr): point cloud
 
         Returns:
-            arr: list of all the voxels, each arrays containing points
-            arr: coordinates of voxels in the first return array
+            voxel_features (arr): (N, X, 7),
+                where N = number of non-empty voxels,
+                X = max points per voxel (See T in 2.1.1), and
+                7 encodes [x,y,z,reflectance,Δx,Δy,Δz],
+                    where Δ is from the mean of all points in the voxel
+
+            voxel_coords (arr): (N, 3),
+                where N = number of non-empty voxels and
+                3 encodes [Z voxel, Y voxel, X voxel]
         '''
         # Shuffle the points
         np.random.shuffle(lidar)
@@ -202,7 +209,7 @@ class KittiDataset(data.Dataset):
             # Augment each point with its relative offset
             # w.r.t. the centroid of this voxel (See 2.1.1)
             voxel[:pts.shape[0], :] = np.concatenate(
-                (pts, pts[:, :3] - np.mean(pts[:, :3], 0)), axis=1)
+                (pts, pts[:, :3] - np.mean(pts[:, :3], axis=0)), axis=1)
             voxel_features.append(voxel)
 
         return np.array(voxel_features), voxel_coords

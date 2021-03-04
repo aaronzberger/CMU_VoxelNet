@@ -5,6 +5,33 @@ from utils import load_config, get_num_voxels
 config = load_config()
 
 
+class FCN(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(FCN, self).__init__()
+
+        self.linear = nn.Linear(in_channels, out_channels)
+        self.batch_norm = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # View as list of point features
+        num_voxels, max_pts, _ = x.shape
+        x = x.view(num_voxels * max_pts, -1)
+
+        # Each point is transformed through the fully connected network (FCN)
+        # The FCN is composed of a linear layer, a batch normalization (BN)
+        # layer, and a rectified linear unit (ReLU) layer
+        # (2.1.1 Stacked Voxel Feature Encoding)
+        x = self.linear(x)
+        x = self.batch_norm(x)
+        x = self.relu(x)
+
+        # View as voxels
+        x = x.view(num_voxels, max_pts, -1)
+
+        return x
+
+
 # conv2d + bn + relu
 class Conv2d(nn.Module):
     def __init__(self, in_channels, out_channels, k, s, p,
@@ -50,34 +77,32 @@ class Conv3d(nn.Module):
 class VFE(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(VFE, self).__init__()
-        assert out_channels % 2 == 0
         self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.units = out_channels // 2
 
-        self.linear = nn.Linear(self.in_channels, self.units)
-        self.relu = nn.ReLU()
-        self.batch_norm = nn.BatchNorm1d(self.units)
+        # The linear layer learns a matrix of size cᵢₙ×(cₒᵤₜ/2)
+        # (2.1.1 Stacked Voxel Feature Encoding)
+        assert out_channels % 2 == 0
+        self.units = out_channels // 2
+        self.fcn = FCN(self.in_channels, self.units)
 
     def forward(self, x, mask):
-        x = self.linear(x).transpose(1, 2)
-        x = self.relu(x)
-        x = self.batch_norm(x).transpose(1, 2)
+        # Each pt is transformed through the FCN into a feature space (2.1.1)
+        x = self.fcn(x)
 
-        # After passing through the Fully Connected Net,
-        # we obtain point-wise features
-
-        # Obtain locally aggregated features through element-wise MaxPool
+        # After obtaining point-wise feature representations, we use
+        # elementwise MaxPooling across all points get the
+        # locally aggregated feature (2.1.1)
         aggregated = torch.max(x, dim=1, keepdim=True)[0]
 
-        # Copy the locally aggregated features so we can concat
-        # it with each point-wise feature
-        repeated = aggregated.expand(-1, config["max_pts_per_voxel"], -1)
-
-        # Concat the point-wise features with the locally aggregated features
+        # Augment each point with the aggregated feature to form the
+        # point-wise concatenated feature (2.1.1)
+        repeated = aggregated.expand(-1, config['max_pts_per_voxel'], -1)
         concat = torch.cat([x, repeated], dim=2)
 
         mask = mask.expand(-1, -1, self.units * 2)
+
+        # mask encodes where the points actually exist, so multiply by mask
+        # to filter out where we concatenated to non-existent points above
         concat = concat * mask.float()
 
         return concat
@@ -89,17 +114,22 @@ class SVFE(nn.Module):
         super(SVFE, self).__init__()
         self.vfe_1 = VFE(7, 32)
         self.vfe_2 = VFE(32, 128)
+        self.fcn = FCN(128, 128)
 
     def forward(self, x):
+        # mask is a (X, 35, 1) and represents for each voxel,
+        # for each possible point, whether a point exists there
         # torch.max returns (values, indices), so use the first
         mask = torch.ne(torch.max(x, dim=2, keepdim=True)[0], 0)
+
         x = self.vfe_1(x, mask)
         x = self.vfe_2(x, mask)
 
-        # After obtaining point-wise feature representations,
-        # we use element-wise MaxPooling across all voxels get the
-        # locally aggregated feature (See 2.1.1)
+        # The voxel-wise feature is obtained by transforming the output of
+        # VFE-n through an FCN and applying element-wise Maxpool (2.1.1)
+        x = self.fcn(x)
         voxelwise_features = torch.max(x, dim=1)[0]
+
         return voxelwise_features
 
 
