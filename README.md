@@ -32,7 +32,7 @@ where
 <code>[x, y, z, r, x-v<sub>x</sub>, y-v<sub>y</sub>, z-v<sub>z</sub>]</code>, where `v` is the centroid of the points in the voxel, and `r` is the reflectance.  
 &ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; *See 2.1.1: Feature Learning Network: Stacked Voxel Feature Encoding*  
 <br /><br />
-From this voxelization, we also get&ensp;&ensp;&ensp;`(X, 3)` ⇾ `(N, 3)`
+From this voxelization, we also get another array:&ensp;&ensp;&ensp;`(X, 3)` ⇾ `(N, 3)`
 
 where  
 &ensp;&ensp;&ensp;&ensp;&ensp;&ensp;N is the number of non-empty voxels,  
@@ -60,9 +60,9 @@ The VoxelNet architecture will output two arrays:
 &ensp;&ensp;&ensp;regression map: the distance from the predicted object to the anchor  
 
 Our `pos_equal_one` array is the ground truth for the probability score map.
-There are 70,400 values, each either 0 or 1. If there are X ground truth labels, the array will contain X 1s and all other values will be zero
+There are 70,400 values, each either 0 or 1. If there are X ground truth labels, the array will contain X 1s and all other values will be zeroz
 
-Our `neg_equal_one` array is simply the exact opposite of `pos_equal_one`, containing 1s everywhere except where there are objects.
+Our `neg_equal_one` array is the exact opposite of `pos_equal_one`, containing 1s everywhere except where there are objects.
 
 ---
 
@@ -74,15 +74,15 @@ Lastly, our `targets` array is the ground truth for the regression map. This arr
 ### Post Processing
 After VoxelNet outputs a probability score map and a regression map, as outlined in the section above, we have to convert these values to bounding boxes.
 
-This process is not described in the paper, but we can simply obtain x, y, z, l, w, h, θ by using the inverse of how we calculated the `targets` array above.
+This process is not described in the paper, but we can simply obtain x, y, z, length, width, height, and θ of the bounding box by using the inverse of how we calculated the `targets` array above.
 See [here](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/src/conversions.py#L325-L391) to see how we calculate these values. 
 
 This method is validated: If we pass in the `pos_equal_one` and `targets` array, which are the ground truths for the probability score map and regression map,
 the bounding boxes match the ground truths specified by the original labels.
 
 ## Usage
-First, in [`config.py`](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/src/config.py), chance `base_dir` to
-the path to your `CMU_VoxelNet` folder. Change `data_dir` to the path to your KITTI dataset directory.  
+First, in [`config.py`](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/src/config.py), change `base_dir` to
+the path to your `CMU_VoxelNet` folder. Change `data_dir` to the path to your KITTI dataset directory. For info on data preparation, see [here](https://github.com/Hqss/VoxelNet_PyTorch#data-preparation). Your data must be formatted this way for this repo to work.
 
 To run training, use
 
@@ -90,7 +90,11 @@ To run training, use
 
 Specify hyperparameters in the [`config.json`](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/config.json) file.
 
-The training module saves the visualizations of X examples every E epochs, where X is the `num_viz` variable, and E is the `viz_every` variable in the `config.json` file.
+Here are some hyperparameters you may wish to change:  
+- `viz_every`: the code saves the visualizations of `num_viz` examples every `viz_every` epochs.  
+- `num_viz`: how many examples to save every `viz_every` epochs.  
+- `save_every`: the code saves the model state dictionary every `save_every` epochs into the `save` folder.  
+- `resume_from`: if you wish to resume training, set this to the epoch number to resume from. It will look in the `save` folder for the model state dictionary, so look there to see which state dictionaries you have available to resume from.  
 
 ## Visualization
 Once you've run the training module, your `CMU_VoxelNet` folder will have a `viz` folder inside. This folder will contain files named like `epochXXXpclXXXXXX.npz`.
