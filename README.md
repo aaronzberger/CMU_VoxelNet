@@ -29,7 +29,7 @@ where
 &ensp;&ensp;&ensp;&ensp;&ensp;&ensp;B is the max number of points per voxel (if there are more than B points, randomly sample B points to keep),  
 &ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; *See 2.1.1: Feature Learning Network: Random  Sampling*  
 &ensp;&ensp;&ensp;&ensp;&ensp;&ensp;7 encodes
-<code>[x, y, z, r, x-v<sub>x</sub>, y-v<sub>y</sub>, z-v<sub>z</sub>]</code>, where `v` is the centroid of the points in the voxel, and `r` is the reflectance.  
+<code>[x, y, z, r, x-v<sub>x</sub>, y-v<sub>y</sub>, z-v<sub>z</sub>]</code>, where `v` is the centroid of the voxel, and `r` is the reflectance.  
 &ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; *See 2.1.1: Feature Learning Network: Stacked Voxel Feature Encoding*  
 <br /><br />
 From this voxelization, we also get another array:&ensp;&ensp;&ensp;`(X, 3)` ⇾ `(N, 3)`
@@ -49,9 +49,12 @@ In order to calculate loss, we have to calculate a few arrays: we'll call them `
 
 ---
 
-Our `anchors` are essentially the options for the network for where it thinks the objects are. For VoxelNet, we have 70,400 anchors.
+Our `anchors` are essentially the options for the network for where it thinks the objects are. For VoxelNet, we have 70,400 anchors.  
+
 To [calculate these anchors](https://github.com/aaronzberger/CMU_VoxelNet/blob/8fb81d1eb2a1855ab2ca9947cc8d4bfe70c0aebd/src/utils.py#L89-L125),
-we simply make a grid and place anchors every x, every y, and every z, at specified rotations (where x, y, and z are constants). The anchors are in the form `[x, y, z, height, width, length, rotation]`
+we simply make a grid and place anchors every x, every y, and every z, at specified rotations (where x, y, and z are constants).  
+
+The anchors are in the form `[x, y, z, height, width, length, rotation]`
 
 ---
 
@@ -68,7 +71,7 @@ Our `neg_equal_one` array is the exact opposite of `pos_equal_one`, containing 1
 
 Lastly, our `targets` array is the ground truth for the regression map. This array has 70,400 arrays, each encoding 
 
-&ensp;&ensp;&ensp;`[Δx, Δy, Δz, Δl, Δw, Δh, Δθ]`, where these deltas are calculated according to *2.2 Loss Function*
+&ensp;&ensp;&ensp;`[Δx, Δy, Δz, Δl, Δw, Δh, Δθ]`, where these deltas are calculated according to &ensp;&ensp;*2.2 Loss Function*
 
 
 ### Post Processing
@@ -77,29 +80,30 @@ After VoxelNet outputs a probability score map and a regression map, as outlined
 This process is not described in the paper, but we can simply obtain x, y, z, length, width, height, and θ of the bounding box by using the inverse of how we calculated the `targets` array above.
 See [here](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/src/conversions.py#L325-L391) to see how we calculate these values. 
 
-This method is validated: If we pass in the `pos_equal_one` and `targets` array, which are the ground truths for the probability score map and regression map,
-the bounding boxes match the ground truths specified by the original labels.
+This method is validated (we know it works): If we pass in the `pos_equal_one` and `targets` array, which are the ground truths for the probability score map and regression map, the bounding boxes match the ground truths specified by the original labels.  
 
 ## Usage
 First, in [`config.py`](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/src/config.py), change `base_dir` to
 the path to your `CMU_VoxelNet` folder. Change `data_dir` to the path to your KITTI dataset directory. For info on data preparation, see [here](https://github.com/Hqss/VoxelNet_PyTorch#data-preparation). Your data must be formatted this way for this repo to work.
 
+---
+
 To run training, use
 
 `python main.py train`
 
-Specify hyperparameters in the [`config.json`](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/config.json) file.
+---
 
-Here are some hyperparameters you may wish to change:  
+Specify hyperparameters in the [`config.json`](https://github.com/aaronzberger/CMU_VoxelNet/blob/7f730eacae1f024400f4b245f0b241321bdf8e07/config.json) file. Here are some you may wish to modify:  
 - `viz_every`: the code saves the visualizations of `num_viz` examples every `viz_every` epochs.  
 - `num_viz`: how many examples to save every `viz_every` epochs.  
 - `save_every`: the code saves the model state dictionary every `save_every` epochs into the `save` folder.  
 - `resume_from`: if you wish to resume training, set this to the epoch number to resume from. It will look in the `save` folder for the model state dictionary, so look there to see which state dictionaries you have available to resume from.  
 
 ## Visualization
-Once you've run the training module, your `CMU_VoxelNet` folder will have a `viz` folder inside. This folder will contain files named like `epochXXXpclXXXXXX.npz`.
+Once you've run the training module, your `CMU_VoxelNet` folder will have a `viz` folder inside. This folder will contain files named like `epochXXXpclYYYYYY.npz`, where `XXX` is the epoch, and `YYYYYY` is the point cloud number.
 
-These are the saved prediction bounding boxes, lidar, and ground truth boxes. To display them. Use the `viz_3d.py` file.
+These files are the saved prediction bounding boxes, lidar, and ground truth boxes for a specific point cloud. To display them. Use the `viz_3d.py` file.
 
 To visualize every file in the viz folder in order: `python viz_3d.py all`.
 
