@@ -203,7 +203,6 @@ class RPN(nn.Module):
         x = self.block_2(x)
         block_2_feature_map = x
         x = self.block_3(x)
-
         # Upsample the output of every block to a fixed size (2.1.3)
         x_0 = self.deconv_1(x)
         x_1 = self.deconv_2(block_2_feature_map)

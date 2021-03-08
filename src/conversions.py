@@ -279,8 +279,11 @@ def delta_to_boxes3d(deltas, anchors):
     ReturnsL
         arr: the bounding boxes
     '''
-    N = deltas.shape[0]
-    deltas = deltas.view(N, -1, 7)
+    batch_size = deltas.shape[0]
+
+    # View in the same form as a list of all anchors
+    deltas = deltas.view(batch_size, -1, 7)
+
     anchors = torch.FloatTensor(anchors)
     boxes3d = torch.zeros_like(deltas)
 
@@ -295,11 +298,13 @@ def delta_to_boxes3d(deltas, anchors):
     anchors_diagonal = torch.sqrt(
         anchors_reshaped[:, 4] ** 2 + anchors_reshaped[:, 5] ** 2)
 
-    # Repeat so we can multiply X and Y in same mul operation
-    anchors_diagonal = anchors_diagonal.repeat(N, 2, 1).transpose(1, 2)
+    # Repeat across the batch and across [X, Y]
+    anchors_diagonal = anchors_diagonal.repeat(
+        batch_size, 2, 1).transpose(1, 2)
 
-    # Copy over the batch size
-    anchors_reshaped = anchors_reshaped.repeat(N, 1, 1)
+    # Repeat over the batch size
+    anchors_reshaped = anchors_reshaped.repeat(
+        batch_size, 1, 1)
 
     # Δx = (xᵍ - xᵃ) / dᵃ and Δy = (yᵍ - yᵃ) / dᵃ
     # so x = (Δx * dᵃ) + xᵃ and y = (Δy * dᵃ) + yᵃ
@@ -322,7 +327,7 @@ def delta_to_boxes3d(deltas, anchors):
     return boxes3d
 
 
-def ouput_to_boxes(prob_score_map, reg_map):
+def output_to_boxes(prob_score_map, reg_map):
     '''
     Convert VoxelNet output to bounding boxes for visualization
 

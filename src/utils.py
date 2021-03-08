@@ -99,10 +99,15 @@ def get_anchors():
     # Make the anchor grid (center notation)
     x = np.linspace(config['pcl_range']['X1'] + config['voxel_size']['W'],
                     config['pcl_range']['X2'] - config['voxel_size']['W'],
-                    voxel_W//2)
+                    voxel_W // 2)
     y = np.linspace(config['pcl_range']['Y1'] + config['voxel_size']['H'],
                     config['pcl_range']['Y2'] - config['voxel_size']['H'],
-                    voxel_H//2)
+                    voxel_H // 2)
+
+    # x = np.linspace(config['pcl_range']['X1'], config['pcl_range']['X2'],
+    #                 voxel_W)
+    # y = np.linspace(config['pcl_range']['Y1'], config['pcl_range']['Y2'],
+    #                 voxel_H)
 
     # Get the xs and ys for the grid
     cx, cy = np.meshgrid(x, y)
@@ -135,7 +140,7 @@ def filter_pointcloud(lidar, boxes3d=None, config=None):
 
     Returns:
         arr: cropped point cloud
-        arr: cropped ground truth boxes
+        arr: valid ground truth boxes
     '''
     config = load_config(config)
 
@@ -144,16 +149,15 @@ def filter_pointcloud(lidar, boxes3d=None, config=None):
     z_pts = lidar[:, 2]
 
     # Determine indexes of valid, in-bound points
-    valid_x = np.where((x_pts >= config['pcl_range']['X1'])
+    lidar_x = np.where((x_pts >= config['pcl_range']['X1'])
                        & (x_pts < config['pcl_range']['X2']))[0]
-    valid_y = np.where((y_pts >= config['pcl_range']['Y1'])
+    lidar_y = np.where((y_pts >= config['pcl_range']['Y1'])
                        & (y_pts < config['pcl_range']['Y2']))[0]
-    valid_z = np.where((z_pts >= config['pcl_range']['Z1'])
+    lidar_z = np.where((z_pts >= config['pcl_range']['Z1'])
                        & (z_pts < config['pcl_range']['Z2']))[0]
 
     # Combine the index arrays
-    valid_xy = np.intersect1d(valid_x, valid_y)
-    valid_xyz = np.intersect1d(valid_xy, valid_z)
+    lidar_valid_xyz = np.intersect1d(lidar_z, np.intersect1d(lidar_x, lidar_y))
 
     # Also crop the 3d boxes if provided
     if boxes3d is not None:
@@ -163,11 +167,12 @@ def filter_pointcloud(lidar, boxes3d=None, config=None):
             & (boxes3d[:, :, 1] < config['pcl_range']['Y2'])
         box_z = (boxes3d[:, :, 2] >= config['pcl_range']['Z1']) \
             & (boxes3d[:, :, 2] < config['pcl_range']['Z2'])
-        box_xyz = np.sum(box_x & box_y & box_z, axis=1)
 
-        return lidar[valid_xyz], boxes3d[box_xyz > 0]
+        box_valid_xyz = np.sum(box_x & box_y & box_z, axis=1)
 
-    return lidar[valid_xyz]
+        return lidar[lidar_valid_xyz], boxes3d[box_valid_xyz > 0]
+
+    return lidar[lidar_valid_xyz]
 
 
 def load_kitti_calib(calib_file):
@@ -187,16 +192,16 @@ def load_kitti_calib(calib_file):
     obj = lines[2].strip().split(' ')[1:]
     P2 = np.array(obj, dtype=np.float32)
     obj = lines[4].strip().split(' ')[1:]
-    R0 = np.array(obj, dtype=np.float32)
+    R0_rect = np.array(obj, dtype=np.float32)
     obj = lines[5].strip().split(' ')[1:]
     Tr_velo_to_cam = np.array(obj, dtype=np.float32)
 
     return {'P2': P2.reshape(3, 4),
-            'R0': R0.reshape(3, 3),
-            'Tr_velo2cam': Tr_velo_to_cam.reshape(3, 4)}
+            'R0_rect': R0_rect.reshape(3, 3),
+            'Tr_velo_to_cam': Tr_velo_to_cam.reshape(3, 4)}
 
 
-def box3d_cam_to_velo(box3d, Tr=None):
+def box3d_cam_to_velo(box3d, tr_velo_to_cam, R0_rect):
     '''
     Transform bounding boxes from center to corner notation
     and transform to velodyne frame
@@ -209,33 +214,36 @@ def box3d_cam_to_velo(box3d, Tr=None):
         arr: bounding box in corner notation
     '''
 
-    def project_cam2velo(cam, Tr):
-        if Tr is None:
-            return cam[:3].reshape(1, 3)
-        T = np.zeros([4, 4], dtype=np.float32)
-        T[:3, :] = Tr
-        T[3, 3] = 1
-        T_inv = np.linalg.inv(T)
-        lidar_loc_ = np.dot(T_inv, cam)
-        lidar_loc = lidar_loc_[:3]
-        return lidar_loc.reshape(1, 3)
+    def camera_to_lidar_box(coord, tr_velo_to_cam, R0_rect):
+        R0_formatted = np.eye(4)
+        R0_formatted[:3, :3] = R0_rect
+        tr_formatted = np.concatenate(
+            [tr_velo_to_cam, np.array([0, 0, 0, 1]).reshape(1, 4)], axis=0)
+        coord = np.matmul(np.linalg.inv(R0_formatted), coord)
+        coord = np.matmul(np.linalg.inv(tr_formatted), coord)
+        return coord[:3].reshape(1, 3)
 
     def ry_to_rz(ry):
-        angle = -ry - np.pi / 2
+        rz = -ry - np.pi / 2
+        limit_degree = 5
+        while rz >= np.pi / 2:
+            rz -= np.pi
+        while rz < -np.pi / 2:
+            rz += np.pi
 
-        if angle >= np.pi:
-            angle -= np.pi
-        if angle < -np.pi:
-            angle = 2*np.pi + angle
-
-        return angle
+        # So we don't have -pi/2 and pi/2
+        if abs(rz + np.pi / 2) < limit_degree / 180 * np.pi:
+            rz = np.pi / 2
+        return rz
 
     # KITTI labels are formatted [hwlxyzr]
     h, w, l, tx, ty, tz, ry = [float(i) for i in box3d]
 
     # Position in labels are in cam coordinates. Transform to lidar coords
     cam = np.expand_dims(np.array([tx, ty, tz, 1]), 1)
-    translation = project_cam2velo(cam, Tr)
+    translation = camera_to_lidar_box(cam, tr_velo_to_cam, R0_rect)
+
+    rotation = ry_to_rz(ry)
 
     # Very similar code as in box3d_center_to_corner in conversions.py
     # Create the bounding box outline (to be transposed)
@@ -243,8 +251,6 @@ def box3d_cam_to_velo(box3d, Tr=None):
         [-l/2, -l/2, l/2, l/2, -l/2, -l/2, l/2, l/2],
         [w/2, -w/2, -w/2, w/2, w/2, -w/2, -w/2, w/2],
         [0, 0, 0, 0, h, h, h, h]])
-
-    rotation = ry_to_rz(ry)
 
     # Standard 3x3 rotation matrix around the Z axis
     rotation_matrix = np.array([
@@ -265,7 +271,7 @@ def box3d_cam_to_velo(box3d, Tr=None):
     return corner_box.astype(np.float32)
 
 
-def load_kitti_label(label_file, Tr):
+def load_kitti_label(label_file, tr_velo_to_cam, R0_rect):
     '''
     Load the labels for a specific image
 
@@ -291,7 +297,7 @@ def load_kitti_label(label_file, Tr):
             continue
 
         # Transform label into coordinates of 8 points that make up the bbox
-        box3d_corner = box3d_cam_to_velo(obj[8:], Tr)
+        box3d_corner = box3d_cam_to_velo(obj[8:], tr_velo_to_cam, R0_rect)
 
         gt_boxes3d_corner.append(box3d_corner)
 

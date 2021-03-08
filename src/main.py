@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from config import base_dir
-from conversions import ouput_to_boxes
+from conversions import output_to_boxes
 from dataset import get_data_loader
 from utils import load_config, get_model_path, mkdir_p
 from viz_3d import save_viz_batch
@@ -51,6 +51,15 @@ def train(device):
     writer_counter = 0
 
     config = load_config()
+
+    print('''\nLoaded hyperparameters:
+    Learning Rate:   %s
+    Batch size:      %s
+    Epochs:          %s
+    Device:          %s
+    ''' % (config['learning_rate'], config['batch_size'], config['max_epochs'],
+           'CPU' if device == torch.device('cpu') else 'GPU'))
+
     net, loss_fn, optimizer, scheduler = build_model(device)
 
     # Get the data from dataset.py
@@ -126,9 +135,16 @@ def train(device):
                 # Visualize this image
                 with torch.no_grad():
                     if progress.n // config['batch_size'] in indices:
+                        # [BS, C, W, H] -> [BS, W, H, C]
+                        prob_score_map = prob_score_map.permute(
+                            0, 2, 3, 1).contiguous()
+                        reg_map = reg_map.permute(
+                            0, 2, 3, 1).contiguous()
+
                         # Convert VoxelNet output to bounding boxes
-                        boxes_corner, boxes_center = ouput_to_boxes(
+                        boxes_corner, _ = output_to_boxes(
                             prob_score_map, reg_map)
+
                         if boxes_corner is not None:
                             # Save the bounding boxes to a file (viz folder)
                             save_viz_batch(
