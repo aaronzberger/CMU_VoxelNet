@@ -1,10 +1,10 @@
 {
     "class_list": [
-        "Car"
+        "trunk"
     ],
     "batch_size": 1,
     "learning_rate": 0.01,
-    "max_epochs": 170,
+    "max_epochs": 150,
     "save_every": 1,
     "resume_from": 0,
     "viz_every": 1,
@@ -17,16 +17,16 @@
     "max_pts_per_voxel": 35,
     "voxel_size": {
         "D": 0.4,
-        "H": 0.2,
-        "W": 0.2
+        "H": 0.4,
+        "W": 0.4
     },
     "pcl_range": {
-        "X1": 0,
-        "X2": 70.4,
-        "Y1": -40,
-        "Y2": 40,
+        "X1": -62,
+        "X2": 0,
+        "Y1": -72,
+        "Y2": -20,
         "Z1": -3,
-        "Z2": 1
+        "Z2": 31
     },
     "IOU_pos_threshold": 0.6,
     "IOU_neg_threshold": 0.45,

@@ -1,3 +1,3 @@
-base_dir = '/home/aaron/tree_segmentation'
+base_dir = '/home/aaron/CMU_VoxelNet'
 
 data_dir = '/home/aaron/KITTI'

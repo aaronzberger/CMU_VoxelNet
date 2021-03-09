@@ -96,7 +96,7 @@ def load_custom_label(label_file):
     Returns:
         arr: array containing GT boxes in the corner notation
     '''
-    config = load_config('config_prim')
+    config = load_config('config_trunk')
 
     with open(label_file, 'r') as f:
         lines = f.readlines()
