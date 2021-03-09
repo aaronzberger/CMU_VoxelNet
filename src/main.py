@@ -83,7 +83,7 @@ def train(device):
     for epoch in range(start_epoch, end_epoch):
         # Specify indices in this epoch that will be visualized, as specified
         # in the config json file params
-        if epoch % config['viz_every'] == 0:
+        if epoch % config['viz_every'] == 0 and not config['viz_none']:
             indices = np.random.choice(
                 np.arange(len(train_data_loader) // config['batch_size']),
                 replace=False, size=(config['num_viz']))

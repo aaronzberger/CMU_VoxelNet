@@ -34,6 +34,8 @@ class KittiDataset(data.Dataset):
 
         self.anchors = get_anchors().reshape(-1, 7)
 
+        # Because of the network architecure (deconvs), output feature map
+        # shape is half that of the input
         self.feature_map_shape = (self.voxel_H // 2, self.voxel_W // 2)
 
     def cal_target(self, gt_box3d):
@@ -49,6 +51,7 @@ class KittiDataset(data.Dataset):
             arr: negative anchor positions
             arr: targets
         '''
+
         #       _______________
         # dᵃ = √ (lᵃ)² + (wᵃ)²      is the diagonal of the base
         #                           of the anchor box (See 2.2)
@@ -222,10 +225,10 @@ class KittiDataset(data.Dataset):
 
         # Load the calibration file and the transform from pcl to image
         calib = load_kitti_calib(calib_file)
-        Tr = calib['Tr_velo2cam']
 
         # Load the GT boxes
-        gt_box3d = load_kitti_label(label_file, Tr)
+        gt_box3d = load_kitti_label(
+            label_file, calib['Tr_velo_to_cam'], calib['R0_rect'])
 
         lidar = np.fromfile(lidar_file, dtype=np.float32).reshape(-1, 4)
 
@@ -233,8 +236,6 @@ class KittiDataset(data.Dataset):
 
         # Crop the lidar
         lidar, gt_box3d = filter_pointcloud(lidar, gt_box3d)
-
-        # visualize_lines_3d(gt_box3d, lidar)
 
         # Voxelize
         voxel_features, voxel_coords = self.voxelize(lidar)
