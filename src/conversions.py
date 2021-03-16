@@ -110,8 +110,8 @@ def load_custom_label(label_file):
         if obj[0].strip() not in config['class_list']:
             continue
 
-        h, w, l, tx, ty, tz, ry = [float(i) for i in obj[1:]]
-        tx, ty, tz, w, l, h, ry = [float(i) for i in obj[1:]]
+        # w, h, l, tx, ty, tz, ry = [float(i) for i in obj[1:]]
+        tx, ty, tz, l, w, h, ry = [float(i) for i in obj[1:]]
 
         box = np.expand_dims(np.array([tx, ty, tz, h, w, l, ry]), axis=0)
 

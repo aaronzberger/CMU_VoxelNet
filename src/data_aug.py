@@ -69,7 +69,7 @@ from utils import load_config, filter_pointcloud
 ####################################################
 # Number of swaps
 Amin = 10
-Amax = 75
+Amax = 100
 # Number of voxels to swap (per object)
 Vmin = 2
 Vmax = 10
@@ -174,7 +174,7 @@ def voxelize(lidar, boxes):
         np.array(only_label_cloud_ind, dtype=object)
 
 
-def clip_voxel(voxel, coord):
+def clip_voxel(voxel, coord, origin_centered=False):
     '''
     Eliminate points outside of the bounds of the voxel
 
@@ -187,19 +187,24 @@ def clip_voxel(voxel, coord):
         np.ndarray: voxel (modified input)
     '''
     deltas, _ = get_voxel_info(coord)
+    boundaries = coord[:6]
+    if origin_centered:
+        boundaries = [-deltas[0] / 2, -deltas[1] / 2, -deltas[2] / 2,
+                      deltas[0] / 2, deltas[1] / 2, deltas[2] / 2]
 
     x_pts = voxel[:, 0]
     y_pts = voxel[:, 1]
     z_pts = voxel[:, 2]
-    valid_x = np.where((x_pts >= -deltas[0] / 2)
-                       & (x_pts <= deltas[0] / 2))[0]
-    valid_y = np.where((y_pts >= -deltas[1] / 2)
-                       & (y_pts <= deltas[1] / 2))[0]
-    valid_z = np.where((z_pts >= -deltas[2] / 2)
-                       & (z_pts <= deltas[2] / 2))[0]
+    valid_x = np.where((x_pts >= boundaries[0])
+                       & (x_pts <= boundaries[3]))[0]
+    valid_y = np.where((y_pts >= boundaries[1])
+                       & (y_pts <= boundaries[4]))[0]
+    valid_z = np.where((z_pts >= boundaries[2])
+                       & (z_pts <= boundaries[5]))[0]
 
     # Combine the index arrays and take only valid points
     valid_xyz = np.intersect1d(valid_z, np.intersect1d(valid_x, valid_y))
+
     return voxel[valid_xyz]
 
 
@@ -223,7 +228,7 @@ def add_noise(voxel, coord):
         point[1] += random_addition()
         point[2] += random_addition()
     
-    voxel = clip_voxel(voxel, coord)
+    voxel = clip_voxel(voxel, coord, origin_centered=False)
 
     return voxel
 
@@ -257,9 +262,7 @@ def rotate_voxel(voxel, coord):
     rotation = R.from_rotvec(axes)
     voxel = rotation.apply(voxel)
     coord[6] = radians
-
-    voxel = clip_voxel(voxel, coord)
-
+    voxel = clip_voxel(voxel, coord, origin_centered=True)
     return voxel, coord
 
 
@@ -300,39 +303,45 @@ def fix_voxel_density(features, coords, label_idx, voxel_idx):
             specified by the label_idx param
 
     Returns:
-        np.ndarray: features (modified input)
-        np.ndarray: coords (modified input)
+        np.ndarray: feature
     '''
     # Calculate the local point density around the voxel
     local_num_pts_avg = 0
     num_voxels = 0
-    for i in range(voxel_idx + 1, min(voxel_idx + num_boxes_away + 1, features[label_idx].shape[0])):
+    # Voxels above the selected voxel
+    for i in range(voxel_idx + 1, min(voxel_idx + num_boxes_away + 1, len(features[label_idx]))):
         local_num_pts_avg += features[label_idx][i].shape[0]
         num_voxels += 1
+    # Voxels below the selected voxel
     for i in range(max(voxel_idx - num_boxes_away, 0), voxel_idx):
         local_num_pts_avg += features[label_idx][i].shape[0]
         num_voxels += 1
     local_num_pts_avg /= num_voxels
 
     num_pts = features[label_idx][voxel_idx].shape[0]
-    max_pts = local_num_pts_avg + num_more_pts_thresh
-    min_pts = local_num_pts_avg - num_fewer_pts_thresh
+    max_pts = round(local_num_pts_avg + num_more_pts_thresh)
+    min_pts = max(round(local_num_pts_avg - num_fewer_pts_thresh), 0)
 
     if num_pts > max_pts:
         # Keep only the max number of points
         keep_indices = sample(range(0, num_pts), max_pts)
         features[label_idx][voxel_idx] = np.take(features[label_idx][voxel_idx], keep_indices, axis=0)
 
+    deltas, centroid = get_voxel_info(coords[label_idx][voxel_idx])
+    boundaries = [-deltas[0] / 2, -deltas[1] / 2, -deltas[2] / 2,
+                  deltas[0] / 2, deltas[1] / 2, deltas[2] / 2]
+
     if num_pts < min_pts:
         # Generate the needed number of points to reach the minimum
         for _ in range(min_pts - num_pts):
-            x = min(coords[label_idx][voxel_idx][3],
-                max(coords[label_idx][voxel_idx][0], np.random.normal(loc=0.0, scale=coords[label_idx][voxel_idx][3] / 3)))
-            y = min(coords[label_idx][voxel_idx][4],
-                max(coords[label_idx][voxel_idx][1], np.random.normal(loc=0.0, scale=coords[label_idx][voxel_idx][4] / 3)))
-            z = min(coords[label_idx][voxel_idx][5],
-                max(coords[label_idx][voxel_idx][2], np.random.normal(loc=0.0, scale=coords[label_idx][voxel_idx][5] / 3)))
-            features[label_idx][voxel_idx] = np.append(features[label_idx][voxel_idx], [x, y, z], axis=0)
+            x = max(boundaries[0], min(boundaries[3], np.random.normal(loc=0.0, scale=deltas[0] / 6)))
+            y = max(boundaries[1], min(boundaries[4], np.random.normal(loc=0.0, scale=deltas[1] / 6)))
+            z = max(boundaries[2], min(boundaries[5], np.random.normal(loc=0.0, scale=deltas[2] / 6)))
+            point = np.array([x, y, z]) + centroid
+            features[label_idx][voxel_idx] = np.concatenate((features[label_idx][voxel_idx], np.expand_dims(point, axis=0)), axis=0)
+    
+    return features[label_idx][voxel_idx]
+
 
 def aug_data(features, coords):
     '''
@@ -354,6 +363,7 @@ def aug_data(features, coords):
         np.ndarray: coords parameter, after data augmentation
         list: coords, but only for the voxels that have been swapped
     '''
+
     swap_indices = []
     only_swap_coords = []
 
@@ -415,6 +425,11 @@ def aug_data(features, coords):
             store_label_1_voxel = features[label_1][label_1_voxel_idx]
             features[label_1][label_1_voxel_idx] = features[label_2][label_2_voxel_idx]
             features[label_2][label_2_voxel_idx] = store_label_1_voxel
+
+            features[label_1][label_1_voxel_idx] = fix_voxel_density(
+                features, coords, label_1, label_1_voxel_idx)
+            features[label_2][label_2_voxel_idx] = fix_voxel_density(
+                features, coords, label_2, label_2_voxel_idx)
 
             # Swap the box indices in the coords array (for coloring)
             store_label_1_color = coords[label_1][label_1_voxel_idx][-1]
@@ -503,7 +518,8 @@ if __name__ == '__main__':
     config = load_config('config_trunk')
     cloud = o3d.io.read_point_cloud(sys.argv[1])
     points = np.asarray(cloud.points)
-    lidar = filter_pointcloud(points, config='config_trunk')
+    # lidar = filter_pointcloud(points, config='config_trunk')
+    lidar = points
 
     # Get an (X, 8, 3) array of the labels
     labels = load_custom_label(sys.argv[2])
@@ -521,16 +537,16 @@ if __name__ == '__main__':
     for _ in range(features.shape[0]):
         label_colors.append([uniform(0.0, 0.9), uniform(0.0, 0.9), uniform(0.0, 0.9)])
 
-    # # Visualize the entire point cloud with black bounding boxes
-    # black = [0, 0, 0]
-    # black_boxes = []
-    # for _ in range(labels.shape[0]):
-    #     black_boxes.append([black for _ in range(12)])
+    # Visualize the entire point cloud with black bounding boxes
+    black = [0, 0, 0]
+    black_boxes = []
+    for _ in range(labels.shape[0]):
+        black_boxes.append([black for _ in range(12)])
 
-    # print('''Displaying the full point cloud and all labels:
-    #     {} labels and {} points'''.format(labels.shape[0], lidar.shape[0]))
-    # visualize_lines_3d(
-    #     pointcloud=lidar, gt_boxes=labels, gt_box_colors=black_boxes, reduce_pts=False)
+    print('''Displaying the full point cloud and all labels:
+        {} labels and {} points'''.format(labels.shape[0], lidar.shape[0]))
+    visualize_lines_3d(
+        pointcloud=lidar, gt_boxes=labels, gt_box_colors=black_boxes, reduce_pts=False)
 
 
     # Visualize only points inside the labels and the bounding boxes
@@ -556,7 +572,7 @@ if __name__ == '__main__':
         only_swap_coords, cloud=augmented_cloud, colors=label_colors)
     
 
-    # # Focus on one label
+    # Focus on one label
     # label_idx = randint(0, len(coords) - 1)
     # deltas = np.array([abs(coords[label_idx][0][3] - coords[label_idx][0][0]),
     #                    abs(coords[label_idx][0][4] - coords[label_idx][0][1]),
