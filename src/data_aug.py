@@ -459,6 +459,59 @@ def aug_data(features, coords):
     return features, coords, only_swap_coords
 
 
+def snap_labels(lidar, labels):
+    '''
+    Compress the labels to eliminate blank space between the last
+    point in every dimension, and the bounding box (especially Z)
+
+    Parameters:
+        lidar (np.ndarray): (N, 3) point cloud
+        labels (np.ndarray): (X, 8, 3) labels in corner notation
+
+    Returns:
+        labels (np.ndarray): (X, 8, 3) modified input
+    '''
+    new_labels = []
+    add_thresh = 0.01
+    for label in labels:
+        min_x, max_x = np.min(label[:, 0]), np.max(label[:, 0])
+        min_y, max_y = np.min(label[:, 1]), np.max(label[:, 1])
+        min_z, max_z = np.min(label[:, 2]), np.max(label[:, 2])
+        
+        x_pts = lidar[:, 0]
+        y_pts = lidar[:, 1]
+        z_pts = lidar[:, 2]
+
+        valid_x = np.where((x_pts >= min_x) & (x_pts <= max_x))[0]
+        valid_y = np.where((y_pts >= min_y) & (y_pts <= max_y))[0]
+        valid_z = np.where((z_pts >= min_z) & (z_pts <= max_z))[0]
+
+        box_pts = lidar[np.intersect1d(valid_z, np.intersect1d(valid_x, valid_y))]
+
+        box_x = box_pts[:, 0]
+        box_y = box_pts[:, 1]
+        box_z = box_pts[:, 2]
+
+        min_x, max_x = min(box_x), max(box_x)
+        min_y, max_y = min(box_y), max(box_y)
+        min_z, max_z = min(box_z), max(box_z)
+
+        bounding_box = np.array([
+            [min_x, max_y, min_z],
+            [min_x, min_y, min_z],
+            [max_x, min_y, min_z],
+            [max_x, max_y, min_z],
+            [min_x, max_y, max_z],
+            [min_x, min_y, max_z],
+            [max_x, min_y, max_z],
+            [max_x, max_y, max_z],
+        ])
+
+        new_labels.append(bounding_box)
+    
+    return np.array(new_labels)
+
+
 def display_voxels(coords, cloud, colors):
     '''
     Given the coordinates of voxels, convert to corner notation and display
@@ -466,7 +519,7 @@ def display_voxels(coords, cloud, colors):
     Parameters:
         coords (np.ndarray): (H, 8) voxel info
         cloud (np.ndarray): (N, 3) point cloud
-        colors (np.ndarray): (X, 3): RGB indicator for each object index
+        colors (np.ndarray): (X, 3) RGB indicator for each object index
     '''
     config = load_config()
     center_boxes = []
@@ -515,14 +568,22 @@ def features_to_cloud(features):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 2:
+        cloud_path = '/home/aaron/tree_pcl_data/cloud_{}/cloud_{}.pcd'.format(sys.argv[1], sys.argv[1])
+        label_path = '/home/aaron/tree_pcl_data/cloud_{}/cloud_{}_labels.txt'.format(sys.argv[1], sys.argv[1])
+    else:
+        cloud_path, label_path = sys.argv[1:3]
+
     config = load_config('config_trunk')
-    cloud = o3d.io.read_point_cloud(sys.argv[1])
+    cloud = o3d.io.read_point_cloud(cloud_path)
     points = np.asarray(cloud.points)
     # lidar = filter_pointcloud(points, config='config_trunk')
     lidar = points
 
     # Get an (X, 8, 3) array of the labels
-    labels = load_custom_label(sys.argv[2])
+    labels = load_custom_label(label_path)
+
+    compressed_labels = snap_labels(lidar, labels)
 
     # Voxelize the labels
     features, coords, cloud_ind = voxelize(lidar, labels)
@@ -547,7 +608,10 @@ if __name__ == '__main__':
         {} labels and {} points'''.format(labels.shape[0], lidar.shape[0]))
     visualize_lines_3d(
         pointcloud=lidar, gt_boxes=labels, gt_box_colors=black_boxes, reduce_pts=False)
-
+    print('''Displaying the full point cloud and all labels compressed:
+        {} labels and {} points'''.format(labels.shape[0], lidar.shape[0]))
+    visualize_lines_3d(
+        pointcloud=lidar, gt_boxes=compressed_labels, gt_box_colors=black_boxes, reduce_pts=False)
 
     # Visualize only points inside the labels and the bounding boxes
     color_boxes = []
@@ -557,19 +621,19 @@ if __name__ == '__main__':
     print('''Displaying only points inside labels:
         {} labels and {} points\n'''.format(labels.shape[0], only_label_pts.shape[0]))
     visualize_lines_3d(
-        pointcloud=only_label_pts, gt_boxes=labels, gt_box_colors=color_boxes,
+        pointcloud=only_label_pts, gt_boxes=compressed_labels, gt_box_colors=color_boxes,
         reduce_pts=True)
 
-    print('Displaying the voxelized labels\n')
-    display_voxels(
-        coords, cloud=only_label_pts, colors=label_colors)
+    # print('Displaying the voxelized labels\n')
+    # display_voxels(
+    #     coords, cloud=only_label_pts, colors=label_colors)
 
-    augmented_features, augmented_coords, only_swap_coords = aug_data(features, coords)
-    augmented_cloud = features_to_cloud(augmented_features)
+    # augmented_features, augmented_coords, only_swap_coords = aug_data(features, coords)
+    # augmented_cloud = features_to_cloud(augmented_features)
 
-    print('Displaying augmented data\n')
-    display_voxels(
-        only_swap_coords, cloud=augmented_cloud, colors=label_colors)
+    # print('Displaying augmented data\n')
+    # display_voxels(
+    #     only_swap_coords, cloud=augmented_cloud, colors=label_colors)
     
 
     # Focus on one label
