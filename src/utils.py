@@ -175,6 +175,59 @@ def filter_pointcloud(lidar, boxes3d=None, config=None):
     return lidar[lidar_valid_xyz]
 
 
+def snap_labels(lidar, labels):
+    '''
+    Compress the labels to eliminate blank space between the last
+    point in every dimension, and the bounding box (especially Z)
+
+    Parameters:
+        lidar (np.ndarray): (N, 3) point cloud
+        labels (np.ndarray): (X, 8, 3) labels in corner notation
+
+    Returns:
+        labels (np.ndarray): (X, 8, 3) modified input
+    '''
+    new_labels = []
+    add_thresh = 0.01
+    for label in labels:
+        min_x, max_x = np.min(label[:, 0]), np.max(label[:, 0])
+        min_y, max_y = np.min(label[:, 1]), np.max(label[:, 1])
+        min_z, max_z = np.min(label[:, 2]), np.max(label[:, 2])
+        
+        x_pts = lidar[:, 0]
+        y_pts = lidar[:, 1]
+        z_pts = lidar[:, 2]
+
+        valid_x = np.where((x_pts >= min_x) & (x_pts <= max_x))[0]
+        valid_y = np.where((y_pts >= min_y) & (y_pts <= max_y))[0]
+        valid_z = np.where((z_pts >= min_z) & (z_pts <= max_z))[0]
+
+        box_pts = lidar[np.intersect1d(valid_z, np.intersect1d(valid_x, valid_y))]
+
+        box_x = box_pts[:, 0]
+        box_y = box_pts[:, 1]
+        box_z = box_pts[:, 2]
+
+        min_x, max_x = min(box_x), max(box_x)
+        min_y, max_y = min(box_y), max(box_y)
+        min_z, max_z = min(box_z), max(box_z)
+
+        bounding_box = np.array([
+            [min_x, max_y, min_z],
+            [min_x, min_y, min_z],
+            [max_x, min_y, min_z],
+            [max_x, max_y, min_z],
+            [min_x, max_y, max_z],
+            [min_x, min_y, max_z],
+            [max_x, min_y, max_z],
+            [max_x, max_y, max_z],
+        ])
+
+        new_labels.append(bounding_box)
+    
+    return np.array(new_labels)
+
+
 def load_kitti_calib(calib_file):
     """
     Retrieve the transforms from the calibration file

@@ -118,18 +118,6 @@ def load_custom_label(label_file):
         # Transform label into coordinates of 8 points that make up the bbox
         box3d_corner = box3d_center_to_corner(box, z_middle=True)
 
-        # Since trunks always start at the ground,
-        # make the lesser Z height of all bounding boxes 0
-        lesser = None
-        for coord in box3d_corner[0]:
-            if lesser is None:
-                lesser = coord[2]
-            elif coord[2] < lesser:
-                lesser = coord[2]
-        for coord in box3d_corner[0]:
-            if coord[2] == lesser:
-                coord[2] = 0
-
         gt_boxes3d_corner.append(box3d_corner)
 
     gt_boxes3d_corner = np.array(gt_boxes3d_corner).reshape(-1, 8, 3)
