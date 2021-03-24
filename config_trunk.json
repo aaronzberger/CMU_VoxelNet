@@ -6,9 +6,9 @@
     "learning_rate": 0.01,
     "max_epochs": 150,
     "save_every": 1,
-    "resume_from": 0,
+    "resume_from": 39,
     "viz_every": 1,
-    "num_viz": 20,
+    "num_viz": 5,
     "viz_none": false,
     "voxel_loss_params": {
         "alpha": 1.5,
@@ -16,9 +16,9 @@
     },
     "max_pts_per_voxel": 35,
     "voxel_size": {
-        "D": 0.4,
-        "H": 0.4,
-        "W": 0.4
+        "D": 4.0,
+        "H": 0.35,
+        "W": 0.35
     },
     "pcl_range": {
         "X1": -35,

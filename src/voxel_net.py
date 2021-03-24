@@ -99,8 +99,8 @@ class Conv2d(nn.Module):
         self.activation = activation
         self.batch_norm = batch_norm
         self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=k, stride=s, padding=p
-        )
+            in_channels, out_channels, kernel_size=k, stride=s, padding=p)
+        self.conv = nn.parallel.DataParallel(self.conv, (0, 1))
 
         # After each convolution layer, BN and ReLU operations are applied
         # (2.1.3 Regional Proposal Network).
@@ -122,8 +122,8 @@ class Conv3d(nn.Module):
         # Each convolutional middle layer applies 3D convolution, BN layer,
         # and ReLU layer sequentially (2.1.2 Convolutional Middle Layers).
         self.conv = nn.Conv3d(
-            in_channels, out_channels, kernel_size=k, stride=s, padding=p
-        )
+            in_channels, out_channels, kernel_size=k, stride=s, padding=p)
+        self.conv = nn.parallel.DataParallel(self.conv, (0, 1))
         self.batch_norm = nn.BatchNorm3d(out_channels)
         self.relu = nn.ReLU()
 
@@ -171,31 +171,39 @@ class Deconv2D(nn.Module):
 class RPN(nn.Module):
     def __init__(self):
         super(RPN, self).__init__()
-        self.block_1 = [Conv2d(128, 128, 3, 2, 1)]
-        self.block_1 += [Conv2d(128, 128, 3, 1, 1) for _ in range(3)]
+        channels_input = 128
+        self.block_1 = [Conv2d(channels_input, channels_input, 3, 2, 1)]
+        self.block_1 += [Conv2d(
+            channels_input, channels_input, 3, 1, 1) for _ in range(3)]
         self.block_1 = nn.Sequential(*self.block_1)
 
-        self.block_2 = [Conv2d(128, 128, 3, 2, 1)]
-        self.block_2 += [Conv2d(128, 128, 3, 1, 1) for _ in range(5)]
+        self.block_2 = [Conv2d(channels_input, channels_input, 3, 2, 1)]
+        self.block_2 += [Conv2d(
+            channels_input, channels_input, 3, 1, 1) for _ in range(5)]
         self.block_2 = nn.Sequential(*self.block_2)
 
-        self.block_3 = [Conv2d(128, 256, 3, 2, 1)]
-        self.block_3 += [Conv2d(256, 256, 3, 1, 1) for _ in range(5)]
+        self.block_3 = [Conv2d(channels_input, channels_input * 2, 3, 2, 1)]
+        self.block_3 += [Conv2d(
+            channels_input * 2, channels_input * 2, 3, 1, 1) for _ in range(5)]
         self.block_3 = nn.Sequential(*self.block_3)
 
-        self.deconv_1 = Deconv2D(256, 256, 4, 4, 0)
-        self.deconv_2 = Deconv2D(128, 256, 2, 2, 0)
+        self.deconv_1 = Deconv2D(
+            channels_input * 2, channels_input * 2, 4, 4, 0)
+        self.deconv_2 = Deconv2D(
+            channels_input, channels_input * 2, 2, 2, 0)
 
         # WARNING:
         # Paper specifies (3, 1, 0), which gives an invalid shape as output,
         # we can either use (1, 1, 0) or (3, 1, 1)
-        self.deconv_3 = Deconv2D(128, 256, 1, 1, 0)
+        self.deconv_3 = Deconv2D(channels_input, channels_input * 2, 1, 1, 0)
 
-        self.prob_map = Conv2d(768, config["anchors_per_position"],
-                               1, 1, 0, activation=False, batch_norm=False)
+        self.prob_map = Conv2d(
+            channels_input * 6, config['anchors_per_position'],
+            1, 1, 0, activation=False, batch_norm=False)
 
-        self.reg_map = Conv2d(768, 7 * config["anchors_per_position"],
-                              1, 1, 0, activation=False, batch_norm=False)
+        self.reg_map = Conv2d(
+            channels_input * 6, 7 * config['anchors_per_position'],
+            1, 1, 0, activation=False, batch_norm=False)
 
     def forward(self, x):
         x = self.block_1(x)
@@ -255,7 +263,7 @@ class VoxelNet(nn.Module):
         sparse = torch.sparse.FloatTensor(
             coords.t(),
             sparse_features,
-            torch.Size([config["batch_size"], self.voxel_D,
+            torch.Size([config['batch_size'], self.voxel_D,
                         self.voxel_H, self.voxel_W, dim]),
         )
 
@@ -265,7 +273,7 @@ class VoxelNet(nn.Module):
         return dense
 
     def forward(self, voxel_features, voxel_coords):
-        """
+        '''
         Parameters:
             voxel_features (arr): (BS, N, X, 7),
                 where N = number of non-empty voxels,
@@ -274,7 +282,7 @@ class VoxelNet(nn.Module):
             voxel_coords (arr): (BS, N, 4),
                 where N = number of non-empty voxels and
                 4 encodes [Batch ID, X voxel, Y voxel, Z voxel]
-        """
+        '''
         # Stacked Voxel Feature Encoding Layers
         vfe_output = self.svfe(voxel_features)
 

@@ -96,7 +96,7 @@ def load_custom_label(label_file):
     Returns:
         arr: array containing GT boxes in the corner notation
     '''
-    config = load_config('config_trunk')
+    config = load_config()
 
     with open(label_file, 'r') as f:
         lines = f.readlines()
@@ -123,6 +123,24 @@ def load_custom_label(label_file):
     gt_boxes3d_corner = np.array(gt_boxes3d_corner).reshape(-1, 8, 3)
 
     return gt_boxes3d_corner
+
+
+def load_numpy_label(labels):
+    corner_boxes = []
+
+    for label in labels:
+        tx, ty, tz, l, w, h, ry = [float(i) for i in label[1:]]
+
+        box = np.expand_dims(np.array([tx, ty, tz, h, w, l, ry]), axis=0)
+
+        # Transform label into coordinates of 8 points that make up the bbox
+        box3d_corner = box3d_center_to_corner(box, z_middle=True)
+
+        corner_boxes.append(box3d_corner)
+
+    corner_boxes = np.array(corner_boxes).reshape(-1, 8, 3)
+
+    return corner_boxes
 
 
 def anchors_center_to_corner(anchors):
@@ -347,7 +365,7 @@ def output_to_boxes(prob_score_map, reg_map):
     for batch_id in range(batch_size):
         # Remove boxes under the threshold
         ind = np.where(
-            batch_probs[batch_id, :] >= config["nms_score_threshold"])
+            batch_probs[batch_id, :] >= config['nms_score_threshold'])
         tmp_boxes3d = batch_boxes3d[batch_id, ind, ...].squeeze()
         tmp_boxes2d = batch_boxes2d[batch_id, ind, ...].squeeze()
         tmp_scores = batch_probs[batch_id, ind].squeeze()
@@ -362,7 +380,7 @@ def output_to_boxes(prob_score_map, reg_map):
         ind, cnt = nms(
             torch.from_numpy(boxes2d).to(device),
             torch.from_numpy(tmp_scores).to(device),
-            config["nms_threshold"],
+            config['nms_threshold'],
             20,
         )
         try:

@@ -10,7 +10,8 @@ from tqdm import tqdm
 
 from config import base_dir
 from conversions import output_to_boxes
-from dataset import get_data_loader
+# from dataset_kitti import get_data_loader
+from dataset_trunks import get_data_loader
 from utils import load_config, get_model_path, mkdir_p
 from viz_3d import save_viz_batch
 from voxel_loss import VoxelLoss
@@ -38,6 +39,92 @@ def build_model(device):
     return net, loss_fn, optimizer, scheduler
 
 
+def validation_round(net, device, epoch_num, writer, counter):
+    '''
+    Find testing data loss
+
+    Parameters:
+        net (torch.nn.Module): the network
+        device (torch.device): the device on which to run
+        epoch_num (int): the epoch number (for saving images)
+    '''
+    net.eval()
+
+    # Always use Classification loss for evaluation
+    _, loss_fn, _, _ = build_model(device)
+
+    # Retrieve the datasets for training and testing
+    _, test_data_loader, _, num_val = get_data_loader()
+
+    with torch.no_grad():
+        # This will keep track of total average loss for all test data
+        ave_loss = 0
+
+        with tqdm(total=num_val, desc='Validation: ', unit=' pointclouds',
+                  leave=False, colour='magenta') as progress:
+            for voxel_features, voxel_coords, pos_equal_one, \
+                neg_equal_one, targets, gt_bounding_boxes, lidar, ids \
+                    in test_data_loader:
+
+                voxel_features = torch.Tensor(voxel_features).to(device)
+                voxel_coords = torch.Tensor(voxel_coords).to(device)
+
+                # Pass through the network
+                prob_score_map, reg_map = net(voxel_features, voxel_coords)
+
+                pos_equal_one = torch.Tensor(pos_equal_one).to(device)
+                neg_equal_one = torch.Tensor(neg_equal_one).to(device)
+                targets = torch.Tensor(targets).to(device)
+
+                # Calculate loss
+                loss, conf_loss, reg_loss = loss_fn(
+                    prob_score_map, reg_map,
+                    pos_equal_one, neg_equal_one, targets)
+
+                ave_loss += loss
+
+                # Add loss info to the Tensorboard logger
+                writer.add_scalars(
+                    main_tag='testing',
+                    tag_scalar_dict={
+                        'loss': loss.item(),
+                        'conf_loss': conf_loss.item(),
+                        'reg_loss': reg_loss.item(),
+                    }, global_step=counter)
+                counter += 1
+
+                # [BS, C, W, H] -> [BS, W, H, C]
+                prob_score_map = prob_score_map.permute(
+                    0, 2, 3, 1).contiguous()
+                reg_map = reg_map.permute(
+                    0, 2, 3, 1).contiguous()
+
+                # Convert VoxelNet output to bounding boxes
+                boxes_corner, _ = output_to_boxes(
+                    prob_score_map, reg_map)
+
+                if boxes_corner is not None:
+                    # Save the bounding boxes to a file (viz folder)
+                    save_viz_batch(
+                        pointcloud=lidar, boxes=boxes_corner,
+                        gt_boxes=gt_bounding_boxes,
+                        epoch=epoch_num, ids=ids)
+
+                # Update the progress bar, moving it along by one batch size
+                progress.set_postfix(
+                    **{'loss': '{:.4f}'.format(abs(loss.item()))})
+                progress.update()
+
+        ave_loss = ave_loss / len(test_data_loader)
+        if epoch_num == 0:
+            print('Initial Benchmark Validation Loss: {:.5f}\n'.format(
+                ave_loss))
+        else:
+            print('Validation Loss After Epoch {}: {:.5f}\n'.format(
+                epoch_num, ave_loss))
+        return ave_loss, counter
+
+
 def train(device):
     '''
     Train the network
@@ -63,7 +150,7 @@ def train(device):
     net, loss_fn, optimizer, scheduler = build_model(device)
 
     # Get the data from dataset.py
-    train_data_loader, num_train = get_data_loader()
+    train_data_loader, _, num_train, _ = get_data_loader()
 
     # Resume training from a certain epoch if specified in config json file
     if config['resume_from'] != 0:
@@ -99,8 +186,10 @@ def train(device):
                   unit='pointclouds', leave=False, colour='green') as progress:
 
             for voxel_features, voxel_coords, pos_equal_one, \
-                neg_equal_one, targets, gt_bounding_boxes, lidar, image, \
-                    calibs, ids in train_data_loader:
+                neg_equal_one, targets, gt_bounding_boxes, lidar, ids \
+                    in train_data_loader:
+                # print(ids)
+                # print('targets', pos_equal_one.shape, targets.shape)
 
                 optimizer.zero_grad()
 
@@ -124,11 +213,11 @@ def train(device):
 
                 # Add loss info to the Tensorboard logger
                 writer.add_scalars(
-                    main_tag="training",
+                    main_tag='training',
                     tag_scalar_dict={
-                        "loss": loss.item(),
-                        "conf_loss": conf_loss.item(),
-                        "reg_loss": reg_loss.item(),
+                        'loss': loss.item(),
+                        'conf_loss': conf_loss.item(),
+                        'reg_loss': reg_loss.item(),
                     }, global_step=writer_counter)
                 writer_counter += 1
 
@@ -171,6 +260,9 @@ def train(device):
         epoch_loss = epoch_loss / len(train_data_loader)
         print('Epoch {}: Training Loss: {:.5f}'.format(
             epoch, epoch_loss))
+
+        val_loss, writer_counter = validation_round(
+            net, device, epoch, writer, writer_counter)
 
         # Save model dict as specified by params in config json
         if epoch == end_epoch or \

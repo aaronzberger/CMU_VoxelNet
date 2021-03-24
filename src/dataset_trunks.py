@@ -1,0 +1,295 @@
+from __future__ import division
+import os
+import os.path
+import torch.utils.data as data
+
+from box_overlaps import bbox_overlaps
+import numpy as np
+
+from utils import load_config, get_num_voxels, get_anchors, snap_labels
+from utils import filter_pointcloud
+from conversions import box3d_corner_to_center_batch, anchors_center_to_corner
+from conversions import corner_to_standup_box2d, load_numpy_label
+
+
+class Trunk_Dataset(data.Dataset):
+    def __init__(self, split='train'):
+        self.config = load_config()
+
+        self.data_path = '/home/aaron/tree_pcl_data/cropped'
+
+        all_files = os.listdir(self.data_path)
+        cutoff = int(len(all_files) * 0.8)
+        if split == 'train':
+            self.file_list = all_files[:cutoff]
+        elif split == 'test':
+            self.file_list = all_files[cutoff:]
+        else:
+            raise ValueError('split must be in [train, test]')
+
+        # Calculate the size of the voxel grid in every dimensions
+        self.voxel_W, self.voxel_H, self.voxel_D = get_num_voxels()
+
+        self.anchors = get_anchors().reshape(-1, 7)
+
+        # Because of the network architecure (deconvs), output feature map
+        # shape is half that of the input
+        self.feature_map_shape = (self.voxel_H // 2, self.voxel_W // 2)
+
+    def cal_target(self, gt_box3d):
+        '''
+        Calculate the positive and negative anchors, and the target
+
+        Parameters:
+            gt_box3d (arr): (N, 8, 3)
+                ground truth bounding boxes in corners notation
+
+        Returns:
+            arr: positive anchor positions
+            arr: negative anchor positions
+            arr: targets
+        '''
+
+        #       _______________
+        # dᵃ = √ (lᵃ)² + (wᵃ)²      is the diagonal of the base
+        #                           of the anchor box (See 2.2)
+        anchors_diagonal = np.sqrt(
+            self.anchors[:, 4] ** 2 + self.anchors[:, 5] ** 2)
+
+        pos_equal_one = np.zeros((*self.feature_map_shape, 2))
+        neg_equal_one = np.zeros((*self.feature_map_shape, 2))
+
+        # Convert from corner to center notation ((N, 8, 3) -> (N, 7))
+        gt_xyzhwlr = box3d_corner_to_center_batch(gt_box3d)
+
+        # Convert anchors to corner notation (BEV)
+        anchors_corner = anchors_center_to_corner(self.anchors)
+
+        # Convert to from all corners to only 2 [xyxy]
+        anchors_standup_2d = corner_to_standup_box2d(anchors_corner)
+        gt_standup_2d = corner_to_standup_box2d(gt_box3d)
+
+        # Calculate IoU of the ground truth and anchors (BEV)
+        iou = bbox_overlaps(
+            np.ascontiguousarray(anchors_standup_2d).astype(np.float32),
+            np.ascontiguousarray(gt_standup_2d).astype(np.float32),
+        )
+        # Indices of X highest anchors by IoU, X = number of ground truths
+        id_highest = np.argmax(iou.T, axis=1)
+
+        # Array containg [0, 1, 2, ..., X-1], X = number of ground truths
+        id_highest_gt = np.arange(iou.T.shape[0])
+
+        # Make sure the anchor we picked has an IoU > 0
+        mask = iou.T[id_highest_gt, id_highest] > 0
+        id_highest, id_highest_gt = id_highest[mask], id_highest_gt[mask]
+
+        # An anchor is considered as positive if it has the highest IoU
+        # with a ground truth or its IoU with ground truth is ≥ pos_threshold
+        # (in BEV). (See 3.1)
+
+        # id_pos: Index of anchor        id_pos_gt: Index of ground truth
+        id_pos, id_pos_gt = np.where(iou > self.config['IOU_pos_threshold'])
+
+        # An anchor is considered as negative if the IoU between it and all
+        # ground truth boxes is less than neg_threshold. (See 3.1)
+        id_neg = np.where(np.sum(iou < self.config['IOU_neg_threshold'],
+                                 axis=1) == iou.shape[1])[0]
+        id_neg.sort()
+
+        id_pos = np.concatenate([id_pos, id_highest])
+        id_pos_gt = np.concatenate([id_pos_gt, id_highest_gt])
+
+        # Filter out repeats (above pos_threshold and max)
+        id_pos, index = np.unique(id_pos, return_index=True)
+        id_pos_gt = id_pos_gt[index]
+
+        # Calculate target (𝘂*) and set corresponding feature map spaces to 1
+        index_x, index_y, index_z = np.unravel_index(
+            id_pos,
+            (*self.feature_map_shape, self.config['anchors_per_position']))
+        pos_equal_one[index_x, index_y, index_z] = 1
+
+        # To retrieve the ground truth box from a matching positive anchor,
+        # we define the residual vector 𝘂* ('targets') containing the 7
+        # regression targets corresponding to center location ∆x,∆y,∆z,
+        # three dimensions ∆l,∆w,∆h, and the rotation ∆θ (See 2.2)
+        targets = np.zeros((*self.feature_map_shape, 14))
+
+        # Δx = (xᵍ - xᵃ) / dᵃ
+        targets[index_x, index_y, np.array(index_z) * 7] = \
+            (gt_xyzhwlr[id_pos_gt, 0] - self.anchors[id_pos, 0]) \
+            / anchors_diagonal[id_pos]
+
+        # Δy = (yᵍ - yᵃ) / dᵃ
+        targets[index_x, index_y, np.array(index_z) * 7 + 1] = \
+            (gt_xyzhwlr[id_pos_gt, 1] - self.anchors[id_pos, 1]) \
+            / anchors_diagonal[id_pos]
+
+        # Δz = (zᵍ - zᵃ) / hᵃ
+        targets[index_x, index_y, np.array(index_z) * 7 + 2] = \
+            (gt_xyzhwlr[id_pos_gt, 2] - self.anchors[id_pos, 2]) \
+            / self.anchors[id_pos, 3]
+
+        # Δh = log(hᵍ / hᵃ)
+        targets[index_x, index_y, np.array(index_z) * 7 + 3] = \
+            np.log(gt_xyzhwlr[id_pos_gt, 3] / self.anchors[id_pos, 3])
+
+        # Δw = log(wᵍ / wᵃ)
+        targets[index_x, index_y, np.array(index_z) * 7 + 4] = \
+            np.log(gt_xyzhwlr[id_pos_gt, 4] / self.anchors[id_pos, 4])
+
+        # Δl = log(lᵍ / lᵃ)
+        targets[index_x, index_y, np.array(index_z) * 7 + 5] = \
+            np.log(gt_xyzhwlr[id_pos_gt, 5] / self.anchors[id_pos, 5])
+
+        # Δ𝜃 = 𝜃ᵍ - 𝜃ᵃ
+        targets[index_x, index_y, np.array(index_z) * 7 + 6] = (
+            gt_xyzhwlr[id_pos_gt, 6] - self.anchors[id_pos, 6])
+
+        index_x, index_y, index_z = np.unravel_index(
+            id_neg,
+            (*self.feature_map_shape, self.config['anchors_per_position']))
+        neg_equal_one[index_x, index_y, index_z] = 1
+
+        # To avoid a box being positive and negative
+        index_x, index_y, index_z = np.unravel_index(
+            id_highest,
+            (*self.feature_map_shape, self.config['anchors_per_position']))
+        neg_equal_one[index_x, index_y, index_z] = 0
+
+        return pos_equal_one, neg_equal_one, targets
+
+    def voxelize(self, lidar):
+        '''
+        Convert a point cloud to a voxelized grid
+
+        Parameters:
+            lidar (arr): point cloud
+
+        Returns:
+            voxel_features (arr): (N, X, 7),
+                where N = number of non-empty voxels,
+                X = max points per voxel (See T in 2.1.1), and
+                7 encodes [x,y,z,reflectance,Δx,Δy,Δz],
+                    where Δ is from the mean of all points in the voxel
+
+            voxel_coords (arr): (N, 3),
+                where N = number of non-empty voxels and
+                3 encodes [Z voxel, Y voxel, X voxel]
+        '''
+        # Shuffle the points
+        np.random.shuffle(lidar)
+
+        voxel_coords = ((lidar[:, :3] - np.array(
+            [self.config['pcl_range']['X1'], self.config['pcl_range']['Y1'],
+             self.config['pcl_range']['Z1']])) / (
+            self.config['voxel_size']['W'], self.config['voxel_size']['H'],
+            self.config['voxel_size']['D'])).astype(np.int32)
+
+        # Convert to (D, H, W)
+        voxel_coords = voxel_coords[:, [2, 1, 0]]
+
+        # Get info on the non-empty voxels
+        voxel_coords, inv_ind, voxel_counts = np.unique(
+            voxel_coords, axis=0, return_inverse=True, return_counts=True)
+
+        voxel_features = []
+
+        for i in range(len(voxel_coords)):
+            voxel = np.zeros(
+                (self.config['max_pts_per_voxel'], 7), dtype=np.float32)
+
+            # inv_ind gives the indices of the elements in the original array
+            pts = lidar[inv_ind == i]
+
+            if voxel_counts[i] > self.config['max_pts_per_voxel']:
+                pts = pts[:self.config['max_pts_per_voxel'], :]
+                voxel_counts[i] = self.config['max_pts_per_voxel']
+
+            # Augment each point with its relative offset
+            # w.r.t. the centroid of this voxel (See 2.1.1)
+            voxel[:pts.shape[0], :] = np.concatenate(
+                (pts, pts[:, :3] - np.mean(pts[:, :3], axis=0)), axis=1)
+            voxel_features.append(voxel)
+
+        return np.array(voxel_features), voxel_coords
+
+    def __getitem__(self, i):
+        data_path = os.path.join(self.data_path, self.file_list[i])
+
+        data = np.load(data_path)
+
+        pointcloud, labels = data['pointcloud'], data['labels']
+
+        # Pad with reflectances as 1
+        if pointcloud.shape[1] == 3:
+            pointcloud = np.concatenate(
+                (pointcloud, np.ones((pointcloud.shape[0], 1))), axis=1)
+
+        # Load the GT boxes
+        gt_box3d = load_numpy_label(labels)
+
+        gt_box3d = snap_labels(pointcloud, gt_box3d)
+
+        # Crop the lidar
+        pointcloud, gt_box3d = filter_pointcloud(pointcloud, gt_box3d)
+
+        # Voxelize
+        voxel_features, voxel_coords = self.voxelize(pointcloud)
+
+        # Calculate positive and negative anchors, and GT target
+        pos_equal_one, neg_equal_one, targets = self.cal_target(gt_box3d)
+
+        return voxel_features, voxel_coords, pos_equal_one, \
+            neg_equal_one, targets, gt_box3d, pointcloud, self.file_list[i]
+
+    def __len__(self):
+        return len(self.file_list)
+
+
+def detection_collate(batch):
+    voxel_features = []
+    voxel_coords = []
+    pos_equal_one = []
+    neg_equal_one = []
+    targets = []
+    gt_bounding_boxes = []
+    pointclouds = []
+    ids = []
+
+    for i, sample in enumerate(batch):
+        voxel_features.append(sample[0])
+
+        # Pad which number in the batch this is
+        # to the beginning of each voxel array (Axis 1)
+        voxel_coords.append(
+            np.pad(sample[1], ((0, 0), (1, 0)),
+                   mode='constant', constant_values=i))
+
+        pos_equal_one.append(sample[2])
+        neg_equal_one.append(sample[3])
+        targets.append(sample[4])
+        gt_bounding_boxes.append(sample[5])
+        pointclouds.append(sample[6])
+
+        ids.append(sample[7])
+
+    return np.concatenate(voxel_features), np.concatenate(voxel_coords), \
+        np.array(pos_equal_one), np.array(neg_equal_one), np.array(targets), \
+        np.array(gt_bounding_boxes), np.array(pointclouds), ids
+
+
+def get_data_loader():
+    train_dataset = Trunk_Dataset(split='train')
+    train_data_loader = data.DataLoader(
+        train_dataset, shuffle=True, batch_size=load_config()['batch_size'],
+        num_workers=8, collate_fn=detection_collate)
+
+    test_dataset = Trunk_Dataset(split='test')
+    test_data_loader = data.DataLoader(
+        test_dataset, shuffle=False, batch_size=load_config()['batch_size'],
+        num_workers=8, collate_fn=detection_collate)
+
+    return train_data_loader, test_data_loader, \
+        len(train_data_loader), len(test_data_loader)

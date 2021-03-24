@@ -9,7 +9,7 @@ import cv2
 
 from utils import load_config, get_num_voxels, get_anchors
 from utils import load_kitti_label, load_kitti_calib, filter_pointcloud
-from config import data_dir
+from config import kitti_data_dir
 from conversions import box3d_corner_to_center_batch, anchors_center_to_corner
 from conversions import corner_to_standup_box2d
 
@@ -18,11 +18,11 @@ class KittiDataset(data.Dataset):
     def __init__(self, split='train'):
         self.config = load_config()
 
-        self.data_path = os.path.join(data_dir, '%sing' % split)
-        self.lidar_path = os.path.join(self.data_path, "cropped/")
-        self.image_path = os.path.join(self.data_path, "image_2/")
-        self.calib_path = os.path.join(self.data_path, "calib/")
-        self.label_path = os.path.join(self.data_path, "label_2/")
+        self.data_path = os.path.join(kitti_data_dir, '%sing' % split)
+        self.lidar_path = os.path.join(self.data_path, 'cropped/')
+        self.image_path = os.path.join(self.data_path, 'image_2/')
+        self.calib_path = os.path.join(self.data_path, 'calib/')
+        self.label_path = os.path.join(self.data_path, 'label_2/')
 
         # Open the split file, containing numbers of the examples in this split
         # with open(os.path.join(self.data_path, '%s.txt' % split)) as f:
@@ -113,7 +113,7 @@ class KittiDataset(data.Dataset):
         pos_equal_one[index_x, index_y, index_z] = 1
 
         # To retrieve the ground truth box from a matching positive anchor,
-        # we define the residual vector 𝘂* ("targets") containing the 7
+        # we define the residual vector 𝘂* ('targets') containing the 7
         # regression targets corresponding to center location ∆x,∆y,∆z,
         # three dimensions ∆l,∆w,∆h, and the rotation ∆θ (See 2.2)
         targets = np.zeros((*self.feature_map_shape, 14))

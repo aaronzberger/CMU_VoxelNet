@@ -7,24 +7,17 @@ import time
 
 import numpy as np
 
-from config import base_dir
+from config import base_dir, config
 
 
-def load_config(config_name=None):
+def load_config():
     '''
     Load the configuration json file
-
-    Returns:
-        config (dict): Python dictionary of hyperparameter name-value pairs
     '''
-    if config_name is None:
-        config_name = 'config'
-    path = os.path.join(base_dir, '{}.json'.format(config_name))
+    with open(config) as file:
+        config_dict = json.load(file)
 
-    with open(path) as file:
-        config = json.load(file)
-
-    return config
+    return config_dict
 
 
 def mkdir_p(path):
@@ -130,7 +123,7 @@ def get_anchors():
     return np.stack([cx, cy, cz, height, width, length, rotation], axis=-1)
 
 
-def filter_pointcloud(lidar, boxes3d=None, config=None):
+def filter_pointcloud(lidar, boxes3d=None):
     '''
     Crop a lidar pointcloud to the dimensions specified in config json
 
@@ -142,7 +135,7 @@ def filter_pointcloud(lidar, boxes3d=None, config=None):
         arr: cropped point cloud
         arr: valid ground truth boxes
     '''
-    config = load_config(config)
+    config = load_config()
 
     x_pts = lidar[:, 0]
     y_pts = lidar[:, 1]
@@ -193,7 +186,7 @@ def snap_labels(lidar, labels):
         min_x, max_x = np.min(label[:, 0]), np.max(label[:, 0])
         min_y, max_y = np.min(label[:, 1]), np.max(label[:, 1])
         min_z, max_z = np.min(label[:, 2]), np.max(label[:, 2])
-        
+
         x_pts = lidar[:, 0]
         y_pts = lidar[:, 1]
         z_pts = lidar[:, 2]
@@ -202,15 +195,16 @@ def snap_labels(lidar, labels):
         valid_y = np.where((y_pts >= min_y) & (y_pts <= max_y))[0]
         valid_z = np.where((z_pts >= min_z) & (z_pts <= max_z))[0]
 
-        box_pts = lidar[np.intersect1d(valid_z, np.intersect1d(valid_x, valid_y))]
+        box_pts = lidar[np.intersect1d(
+            valid_z, np.intersect1d(valid_x, valid_y))]
 
         box_x = box_pts[:, 0]
         box_y = box_pts[:, 1]
         box_z = box_pts[:, 2]
 
-        min_x, max_x = min(box_x), max(box_x)
-        min_y, max_y = min(box_y), max(box_y)
-        min_z, max_z = min(box_z), max(box_z)
+        min_x, max_x = min(box_x) - add_thresh, max(box_x) + add_thresh
+        min_y, max_y = min(box_y) - add_thresh, max(box_y) + add_thresh
+        min_z, max_z = min(box_z) - add_thresh, max(box_z) + add_thresh
 
         bounding_box = np.array([
             [min_x, max_y, min_z],
@@ -224,12 +218,12 @@ def snap_labels(lidar, labels):
         ])
 
         new_labels.append(bounding_box)
-    
+
     return np.array(new_labels)
 
 
 def load_kitti_calib(calib_file):
-    """
+    '''
     Retrieve the transforms from the calibration file
 
     Parameters:
@@ -237,7 +231,7 @@ def load_kitti_calib(calib_file):
 
     Returns:
         dict: dict containing necessary transforms
-    """
+    '''
     with open(calib_file) as fi:
         lines = fi.readlines()
         assert (len(lines) == 8)

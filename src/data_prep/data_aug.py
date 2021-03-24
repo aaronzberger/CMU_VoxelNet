@@ -51,25 +51,27 @@ randomly sampled from [Nmin, Nmax]. For each voxel, add Guassian noise with a co
 standard deviation SD.
 '''
 
+import copy
 from math import ceil
+import os
 import sys
-from random import random, uniform, randint, sample
+from random import uniform, randint, sample
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-from numpy.core.defchararray import center
-import open3d as o3d
 from scipy.spatial.transform import Rotation as R
-import cv2 as cv
 
-from conversions import load_custom_label, box3d_center_to_corner
-from viz_3d import visualize_lines_3d
+from config import data_dir
+from conversions import box3d_center_to_corner, load_numpy_label
 from utils import load_config, snap_labels
+from viz_3d import visualize_lines_3d
 
 
 ####################################################
-# Number of swaps
+# Number of swaps (objects)
 Amin = 10
-Amax = 100
+Amax = 150
 # Number of voxels to swap (per object)
 Vmin = 2
 Vmax = 10
@@ -77,9 +79,11 @@ Vmax = 10
 max_rotation = np.pi / 8
 # Number of noise voxels (per object)
 Nmin = 3
-Nmax = 10
-# STD for adding noise
-noise_std = 0.04
+Nmax = 12
+# STD for adding noise to label points
+label_noise_std = 0.04
+# STD for adding noise to non-label points
+cloud_noise_std = 0.1
 # The voxel at which the bottom of the tree turns into the rest
 trunk_bottom_end = 5
 # After how many additional points to remove or add random points when swapping
@@ -88,6 +92,13 @@ num_fewer_pts_thresh = 10
 num_boxes_away = 3
 # Separation between voxels for better visualization (no overlap)
 viz_voxel_separation = 0.01
+# Number of objects to remove
+Rmin = 3
+Rmax = 15
+# Min percentage of non-label points to remove
+RPmin = 0.02
+# Max percentage of non-label points to remove
+RPmax = 0.2
 ####################################################
 
 
@@ -101,16 +112,17 @@ def voxelize(lidar, boxes):
         boxes (arr): truth bounding boxes in corner notation
 
     Returns:
-        arr: (N, H, X, 3): voxels of the bounding boxes,
+        np.ndarray: (N, H, X, 3): points in the voxels,
             where N is the number of bounding boxes
             H is the variable number of the voxels in the bounding box
             X is the variable number of points in the voxel
             and 3 represents [X, Y, Z]
-        arr: (N, H, 7): bounds of the voxels in the first array:
+        np.ndarray: (N, H, 8): bounds of the voxels:
             where N and H are the same as above
-            and 7 represents mins [X, Y, Z], maxes [X, Y, Z], and label indicator
+            and 8 represents
+                [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
     '''
-    config = load_config(config_name='config_trunk')
+    config = load_config()
 
     # Shuffle the points
     np.random.shuffle(lidar)
@@ -162,7 +174,8 @@ def voxelize(lidar, boxes):
                 np.concatenate((only_label_cloud_ind, valid_xyz)))
 
             object_voxels.append(np.array(pts))
-            object_coords.append(np.array([min_x, min_y, z_bottom, max_x, max_y, z_top, 0, indicator]))
+            object_coords.append(np.array(
+                [min_x, min_y, z_bottom, max_x, max_y, z_top, 0, indicator]))
 
             z_bottom += z_change
 
@@ -181,16 +194,16 @@ def clip_voxel(voxel, coord, origin_centered=False):
     Parameters:
         voxel (np.ndarray): (X, 3) the points
         coord (np.ndarray): (8) voxel info
-            min [X, Y, Z], max [X, Y, Z], yaw, label index
-    
+            [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
+
     Returns:
         np.ndarray: voxel (modified input)
     '''
-    deltas, _ = get_voxel_info(coord)
+    ranges, _ = get_voxel_info(coord)
     boundaries = coord[:6]
     if origin_centered:
-        boundaries = [-deltas[0] / 2, -deltas[1] / 2, -deltas[2] / 2,
-                      deltas[0] / 2, deltas[1] / 2, deltas[2] / 2]
+        boundaries = [-ranges[0] / 2, -ranges[1] / 2, -ranges[2] / 2,
+                      ranges[0] / 2, ranges[1] / 2, ranges[2] / 2]
 
     x_pts = voxel[:, 0]
     y_pts = voxel[:, 1]
@@ -208,27 +221,61 @@ def clip_voxel(voxel, coord, origin_centered=False):
     return voxel[valid_xyz]
 
 
-def add_noise(voxel, coord):
+def trim_pointcloud(pointcloud):
+    '''
+    Trim the pointcloud after data augmentation
+
+    Parameters:
+        pointcloud (np.ndarray): (N, 3) points
+
+    Returns:
+        np.ndarray: (N, 3): filtered input
+    '''
+    config = load_config()
+
+    pointcloud[:, 2] = np.maximum(
+        pointcloud[:, 2], np.zeros_like(pointcloud[:, 2]))
+
+    valid_x = np.where((pointcloud[:, 0] >= config['pcl_range']['X1'])
+                       & (pointcloud[:, 0] <= config['pcl_range']['X2']))[0]
+    valid_y = np.where((pointcloud[:, 1] >= config['pcl_range']['Y1'])
+                       & (pointcloud[:, 1] <= config['pcl_range']['Y2']))[0]
+    valid_z = np.where((pointcloud[:, 2] >= config['pcl_range']['Z1'])
+                       & (pointcloud[:, 2] <= config['pcl_range']['Z2']))[0]
+
+    valid_xyz = np.intersect1d(valid_z, np.intersect1d(valid_x, valid_y))
+
+    return pointcloud[valid_xyz]
+
+
+def add_noise(voxel, std, clip=True, coord=None):
     '''
     Add 3D Gaussian noise to a voxel
 
     Parameters:
         voxel (np.ndarray): (X, 3) the points
+        std (float): standard deviation of noise
+        clip (bool): whether to clip the voxel according to its
+            coordinates after adding noise
         coord (np.ndarray): (8) voxel info
-            min [X, Y, Z], max [X, Y, Z], yaw, label index
-    
+            [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
+
     Returns:
         np.ndarray: voxel (modified input)
     '''
+    if clip is True and coord is None:
+        raise ValueError('If clip is True, coord argument must be provided')
+
     def random_addition():
-        return np.random.normal(loc=0.0, scale=noise_std)
+        return np.random.normal(loc=0.0, scale=std)
 
     for point in voxel:
         point[0] += random_addition()
         point[1] += random_addition()
         point[2] += random_addition()
-    
-    voxel = clip_voxel(voxel, coord, origin_centered=False)
+
+    if clip:
+        voxel = clip_voxel(voxel, coord, origin_centered=False)
 
     return voxel
 
@@ -240,20 +287,20 @@ def rotate_voxel(voxel, coord):
     Parameters:
         voxel (np.ndarray): (X, 3) the points
         coord (np.ndarray): (8) voxel info
-            min [X, Y, Z], max [X, Y, Z], yaw, label index
-        
+            [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
+
     Returns:
         np.ndarray: voxel (modified input)
         np.ndarray: coord (modified input)
     '''
-    # Decide how many radians to rotate
-    # Rotate only close to 0 and 180 deg, or else for rectangles, the XY IoU will decrease
+    # Decide how many radians to rotate (Rotate only close to 0 and 180 deg
+    # or else for rectangles, the XY IoU will decrease)
     # and many points will be out of the label
     if randint(0, 1):
         radians = uniform(-max_rotation, max_rotation)
     else:
         radians = uniform(np.pi - max_rotation, np.pi + max_rotation)
-    
+
     # If we are rotating a voxel that was swapped previously,
     # rotate relative to its current yaw
     radians -= coord[6]
@@ -272,21 +319,21 @@ def get_voxel_info(coord):
 
     Parameters:
         coord (np.ndarray): (8)
-            min [X, Y, Z], max [X, Y, Z], yaw, label index
+            [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
 
     Returns:
-        np.ndarray: [X, Y, Z] deltas
+        np.ndarray: [X, Y, Z] ranges, or deltas
         np.ndarray: [X, Y, Z] centroid
     '''
 
-    deltas = np.array([abs(coord[3] - coord[0]),
+    ranges = np.array([abs(coord[3] - coord[0]),
                        abs(coord[4] - coord[1]),
                        abs(coord[5] - coord[2])])
 
     centroid = np.mean(
         [coord[3:6], coord[:3]], axis=0)
 
-    return deltas, centroid
+    return ranges, centroid
 
 
 def fix_voxel_density(features, coords, label_idx, voxel_idx):
@@ -297,7 +344,7 @@ def fix_voxel_density(features, coords, label_idx, voxel_idx):
     Parameters:
         voxel (np.ndarray): (X, 3) the points
         coord (np.ndarray): (8) voxel info
-            min [X, Y, Z], max [X, Y, Z], yaw, label index
+            [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
         label_idx (int): index of the object in voxel and coord param
         voxel_idx (int): index of the voxel in the object
             specified by the label_idx param
@@ -308,10 +355,13 @@ def fix_voxel_density(features, coords, label_idx, voxel_idx):
     # Calculate the local point density around the voxel
     local_num_pts_avg = 0
     num_voxels = 0
+
     # Voxels above the selected voxel
-    for i in range(voxel_idx + 1, min(voxel_idx + num_boxes_away + 1, len(features[label_idx]))):
+    for i in range(voxel_idx + 1, min(
+            voxel_idx + num_boxes_away + 1, len(features[label_idx]))):
         local_num_pts_avg += features[label_idx][i].shape[0]
         num_voxels += 1
+
     # Voxels below the selected voxel
     for i in range(max(voxel_idx - num_boxes_away, 0), voxel_idx):
         local_num_pts_avg += features[label_idx][i].shape[0]
@@ -325,44 +375,55 @@ def fix_voxel_density(features, coords, label_idx, voxel_idx):
     if num_pts > max_pts:
         # Keep only the max number of points
         keep_indices = sample(range(0, num_pts), max_pts)
-        features[label_idx][voxel_idx] = np.take(features[label_idx][voxel_idx], keep_indices, axis=0)
+        features[label_idx][voxel_idx] = np.take(
+            features[label_idx][voxel_idx], keep_indices, axis=0)
 
-    deltas, centroid = get_voxel_info(coords[label_idx][voxel_idx])
-    boundaries = [-deltas[0] / 2, -deltas[1] / 2, -deltas[2] / 2,
-                  deltas[0] / 2, deltas[1] / 2, deltas[2] / 2]
+    ranges, centroid = get_voxel_info(coords[label_idx][voxel_idx])
+    boundaries = [-ranges[0] / 2, -ranges[1] / 2, -ranges[2] / 2,
+                  ranges[0] / 2, ranges[1] / 2, ranges[2] / 2]
 
     if num_pts < min_pts:
         # Generate the needed number of points to reach the minimum
         for _ in range(min_pts - num_pts):
-            x = max(boundaries[0], min(boundaries[3], np.random.normal(loc=0.0, scale=deltas[0] / 6)))
-            y = max(boundaries[1], min(boundaries[4], np.random.normal(loc=0.0, scale=deltas[1] / 6)))
-            z = max(boundaries[2], min(boundaries[5], np.random.normal(loc=0.0, scale=deltas[2] / 6)))
+            x = max(boundaries[0], min(boundaries[3],
+                    np.random.normal(loc=0.0, scale=ranges[0] / 6)))
+            y = max(boundaries[1], min(boundaries[4],
+                    np.random.normal(loc=0.0, scale=ranges[1] / 6)))
+            z = max(boundaries[2], min(boundaries[5],
+                    np.random.normal(loc=0.0, scale=ranges[2] / 6)))
+
             point = np.array([x, y, z]) + centroid
-            features[label_idx][voxel_idx] = np.concatenate((features[label_idx][voxel_idx], np.expand_dims(point, axis=0)), axis=0)
-    
+            features[label_idx][voxel_idx] = np.concatenate(
+                (features[label_idx][voxel_idx],
+                 np.expand_dims(point, axis=0)), axis=0)
+
     return features[label_idx][voxel_idx]
 
 
 def aug_data(features, coords):
     '''
     Perform data augmentation on the provided object labels:
-    swap, resize, rotate, and add noise
-    
+        swap, resize, rotate, adjust density
+
     Parameters:
-        features (np.ndarray): (N, H, X, 3): voxels of the bounding boxes,
+        features (np.ndarray): (N, H, X, 3): points in the voxels,
             where N is the number of bounding boxes
             H is the variable number of the voxels in the bounding box
             X is the variable number of points in the voxel
             and 3 represents [X, Y, Z]
-        coords (np.ndarray): (N, H, 8): bounds of the voxels in the first array:
+        coords (np.ndarray): (N, H, 8): bounds of the voxels:
             where N and H are the same as above
-            and 8 represents mins [X, Y, Z], maxes [X, Y, Z], yawm and the label indicator
-    
+            and 8 represents
+                [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
+
     Returns:
         np.ndarray: features parameter, after data augmentation
         np.ndarray: coords parameter, after data augmentation
         list: coords, but only for the voxels that have been swapped
     '''
+    # Deep copy the arrays or else the outputs will be references to the inputs
+    features = copy.deepcopy(features)
+    coords = copy.deepcopy(coords)
 
     swap_indices = []
     only_swap_coords = []
@@ -375,57 +436,70 @@ def aug_data(features, coords):
         swap_indices.append(label_1)
         swap_indices.append(label_2)
 
-        # Calculate the length, width, and height of the voxels in each label (for resizing)
-        label_1_deltas, _ = get_voxel_info(coords[label_1][0])
-        label_2_deltas, _ = get_voxel_info(coords[label_2][0])
+        # Get the label ranges for each label
+        label_1_ranges, _ = get_voxel_info(coords[label_1][0])
+        label_2_ranges, _ = get_voxel_info(coords[label_2][0])
 
         num_swaps = randint(Vmin, Vmax)
 
         # Pick V random voxel indices in label_1
-        label_1_voxels = sample(range(0, len(features[label_1])), num_swaps)
+        # Always leave the bottom voxel unchanged as a reference for the yaw
+        label_1_voxels = sample(
+            range(1, len(features[label_1])),
+            min(len(features[label_1]) - 1, num_swaps))
+
         # Pick V random voxel indices in label_2, where the chosen index
         # is in the same region of the object as in label_1
         label_2_voxels = []
         for idx in label_1_voxels:
             if idx <= trunk_bottom_end:
                 label_2_voxels.append(randint(
-                    0,
+                    1,
                     min(trunk_bottom_end, len(features[label_2]) - 1)))
             else:
                 label_2_voxels.append(randint(
                     min(trunk_bottom_end, len(features[label_2]) - 1),
                     len(features[label_2]) - 1))
-        
+
         for label_1_voxel_idx, label_2_voxel_idx in zip(
                 label_1_voxels, label_2_voxels):
-
-            # Calculate the centroids (average of max and min on each axis)
-            _, voxel_1_centroid = get_voxel_info(coords[label_1][label_1_voxel_idx])
-            _, voxel_2_centroid = get_voxel_info(coords[label_2][label_2_voxel_idx])
+            # Get the centroids of the voxels
+            _, voxel_1_centroid = get_voxel_info(
+                coords[label_1][label_1_voxel_idx])
+            _, voxel_2_centroid = get_voxel_info(
+                coords[label_2][label_2_voxel_idx])
 
             # Move both voxels so they are centered around the origin
             features[label_1][label_1_voxel_idx] -= voxel_1_centroid
             features[label_2][label_2_voxel_idx] -= voxel_2_centroid
 
             # Resize the voxels
-            features[label_1][label_1_voxel_idx] *= label_2_deltas / label_1_deltas
-            features[label_2][label_2_voxel_idx] *= label_1_deltas / label_2_deltas
+            features[label_1][label_1_voxel_idx] *= \
+                label_2_ranges / label_1_ranges
+            features[label_2][label_2_voxel_idx] *= \
+                label_1_ranges / label_2_ranges
 
-            # Rotate the voxels
-            features[label_1][label_1_voxel_idx], coords[label_2][label_2_voxel_idx] = \
-                rotate_voxel(features[label_1][label_1_voxel_idx], coords[label_2][label_2_voxel_idx])
-            features[label_2][label_2_voxel_idx], coords[label_1][label_1_voxel_idx] = \
-                rotate_voxel(features[label_2][label_2_voxel_idx], coords[label_1][label_1_voxel_idx])
+            # Rotate the voxels (randomly)
+            features[label_1][label_1_voxel_idx], \
+                coords[label_2][label_2_voxel_idx] = \
+                rotate_voxel(features[label_1][label_1_voxel_idx],
+                             coords[label_2][label_2_voxel_idx])
+            features[label_2][label_2_voxel_idx], \
+                coords[label_1][label_1_voxel_idx] = \
+                rotate_voxel(features[label_2][label_2_voxel_idx],
+                             coords[label_1][label_1_voxel_idx])
 
-            # Apply the translation so the voxel locations are swapped
+            # Apply the translation so the voxels are swapped w.r.t the cloud
             features[label_1][label_1_voxel_idx] += voxel_2_centroid
             features[label_2][label_2_voxel_idx] += voxel_1_centroid
 
-            # Swap the voxels in the features array
+            # Swap the voxel arrays within the features array
             store_label_1_voxel = features[label_1][label_1_voxel_idx]
-            features[label_1][label_1_voxel_idx] = features[label_2][label_2_voxel_idx]
+            features[label_1][label_1_voxel_idx] = \
+                features[label_2][label_2_voxel_idx]
             features[label_2][label_2_voxel_idx] = store_label_1_voxel
 
+            # Ensure the voxel densities are close to those of near voxels
             features[label_1][label_1_voxel_idx] = fix_voxel_density(
                 features, coords, label_1, label_1_voxel_idx)
             features[label_2][label_2_voxel_idx] = fix_voxel_density(
@@ -433,30 +507,121 @@ def aug_data(features, coords):
 
             # Swap the box indices in the coords array (for coloring)
             store_label_1_color = coords[label_1][label_1_voxel_idx][-1]
-            coords[label_1][label_1_voxel_idx][-1] = coords[label_2][label_2_voxel_idx][-1]
+            coords[label_1][label_1_voxel_idx][-1] = \
+                coords[label_2][label_2_voxel_idx][-1]
             coords[label_2][label_2_voxel_idx][-1] = store_label_1_color
-
 
     for idx in swap_indices:
         only_swap_coords.append(coords[idx])
 
-    # Apply noise to some random label voxels
+    return features, coords, only_swap_coords
+
+
+def aug_cloud(features, coords, non_label_pts):
+    '''
+    Apply data augmentation on the point cloud as a whole:
+        add noise, remove random labels, remove random points,
+        rotate and translate
+
+    Parameters:
+        features (np.ndarray): (N, H, X, 3): points in the voxels,
+            where N is the number of bounding boxes
+            H is the variable number of the voxels in the bounding box
+            X is the variable number of points in the voxel
+            and 3 represents [X, Y, Z]
+        coords (np.ndarray): (N, H, 8): bounds of the voxels:
+            where N and H are the same as above
+            and 8 represents
+                [Xₘᵢₙ, Yₘᵢₙ, Zₘᵢₙ, Xₘₐₓ, Yₘₐₓ, Zₘₐₓ, θ, label_index]
+        non_label_pts (np.ndarray): (X, 3) points outside the labels
+
+    Returns:
+        np.ndarray: modified features parameter
+        np.ndarray: modified coords parameter
+        np.ndarray: new entire pointcloud (labels and otherwise)
+    '''
+    # Deep copy the arrays or else the outputs will be references to the inputs
+    features = copy.deepcopy(features)
+    coords = copy.deepcopy(coords)
+
+    # So we can randomly pick any voxel in any object with unform distribution,
+    # match every index with an index in a flattened array
     flattened_coord_indices = []
 
     for object_idx, object in enumerate(coords):
         for voxel_idx, _ in enumerate(object):
             flattened_coord_indices.append((object_idx, voxel_idx))
 
-    num_voxels = min(randint(Nmin * len(coords), Nmax * len(coords)), len(coords))
+    num_voxels = min(randint(Nmin * len(coords), Nmax * len(coords)),
+                     len(coords))
     voxel_indices = sample(range(0, len(flattened_coord_indices)), num_voxels)
 
+    # Apply noise to some random label voxels
     for idx in voxel_indices:
         object_idx, voxel_idx = flattened_coord_indices[idx]
 
         features[object_idx][voxel_idx] = add_noise(
-            features[object_idx][voxel_idx], coords[object_idx][voxel_idx])
+            features[object_idx][voxel_idx], std=label_noise_std, clip=True,
+            coord=coords[object_idx][voxel_idx])
 
-    return features, coords, only_swap_coords
+    # Select indices of labels to keep
+    remove_indices = sample(range(0, len(flattened_coord_indices)),
+                            randint(min(Rmin, len(flattened_coord_indices)),
+                                    min(Rmax, len(flattened_coord_indices))))
+
+    for i, idx in enumerate(remove_indices):
+        object_idx, voxel_idx = flattened_coord_indices[idx]
+        object_idx -= i
+
+        features = np.delete(features, object_idx, axis=0)
+        coords = np.delete(coords, object_idx, axis=0)
+
+    # Add random noise to the non_label points
+    non_label_pts = add_noise(non_label_pts, std=cloud_noise_std, clip=False)
+
+    # Remove some random points from the non-label points
+    cloud_keep_indices = sample(
+        range(0, non_label_pts.shape[0]),
+        non_label_pts.shape[0] -
+        randint(min(int(RPmin * non_label_pts.shape[0]),
+                    non_label_pts.shape[0]),
+                min(int(RPmax * non_label_pts.shape[0]),
+                    non_label_pts.shape[0])))
+    non_label_pts = non_label_pts[cloud_keep_indices]
+
+    new_pointcloud = np.concatenate(
+        (features_to_cloud(features), non_label_pts), axis=0)
+
+    # Rotate the entire pointcloud
+    radians = uniform(-np.pi, np.pi)
+
+    axes = np.array([0, 0, radians])
+    rotation = R.from_rotvec(axes)
+    new_pointcloud = rotation.apply(new_pointcloud)
+
+    # Translate the pointcloud
+    x_translate, y_translate = uniform(-10, 10), uniform(-10, 10)
+    new_pointcloud[:, 0] += x_translate
+    new_pointcloud[:, 1] += y_translate
+
+    # Crop the pointcloud
+    new_pointcloud = trim_pointcloud(new_pointcloud)
+
+    # Rotate the labels
+    for object in coords:
+        for voxel in object:
+            ranges, centroid = get_voxel_info(voxel)
+            centroid = rotation.apply(centroid)
+            centroid[0] += x_translate
+            centroid[1] += y_translate
+            ranges = np.divide(ranges, 2)
+            coord = [centroid[0] - ranges[0], centroid[1] - ranges[1],
+                     centroid[2] - ranges[2], centroid[0] + ranges[0],
+                     centroid[1] + ranges[1], centroid[2] + ranges[2]]
+            voxel[:6] = coord
+            voxel[6] += radians
+
+    return features, coords, new_pointcloud
 
 
 def display_voxels(coords, cloud, colors):
@@ -487,14 +652,14 @@ def display_voxels(coords, cloud, colors):
             r = voxel[6]
 
             center_boxes.append(np.array([x, y, z, h, w, l, r]))
-    
-            box_colors.append([colors[int(voxel[-1])] for _ in range(12)])
-    
-    all_voxel_boxes = box3d_center_to_corner(np.array(center_boxes), z_middle=True)
 
+            box_colors.append([colors[int(voxel[-1])] for _ in range(12)])
+
+    all_voxel_boxes = box3d_center_to_corner(
+        np.array(center_boxes), z_middle=True)
 
     visualize_lines_3d(pointcloud=cloud, gt_boxes=np.array(all_voxel_boxes),
-                       gt_box_colors=box_colors, reduce_pts=True)
+                       gt_box_colors=box_colors, reduce_pts=False)
 
 
 def features_to_cloud(features):
@@ -514,98 +679,91 @@ def features_to_cloud(features):
     return cloud
 
 
+def coords_to_center(coords):
+    ''''''
+    output_labels = []
+
+    for object in coords:
+        voxel = object[0]
+        voxel[5] = object[-1][5]
+        ranges, centroid = get_voxel_info(voxel)
+
+        output_labels.append(np.array(['trunk',
+                                       centroid[0], centroid[1], centroid[2],
+                                       ranges[0], ranges[1], ranges[2],
+                                       voxel[6]]))
+
+    return np.array(output_labels)
+
+
 if __name__ == '__main__':
-    if len(sys.argv) == 2:
-        cloud_path = '/home/aaron/tree_pcl_data/cloud_{}/cloud_{}.pcd'.format(sys.argv[1], sys.argv[1])
-        label_path = '/home/aaron/tree_pcl_data/cloud_{}/cloud_{}_labels.txt'.format(sys.argv[1], sys.argv[1])
-    else:
-        cloud_path, label_path = sys.argv[1:3]
+    if len(sys.argv) not in [3, 4]:
+        raise ValueError(
+            'Usage: data_aug [PCL NUMBER] [NUMBER OF AUGMENTATIONS]' +
+            ' Add \'viz\' at the end to visualize each augmentation')
 
-    config = load_config('config_trunk')
-    cloud = o3d.io.read_point_cloud(cloud_path)
-    points = np.asarray(cloud.points)
+    visualize = False
+    if len(sys.argv) == 4 and sys.argv[3] == 'viz':
+        visualize = True
 
-    # lidar = filter_pointcloud(points, config='config_trunk')
-    lidar = points
+    # Load the labeled pointcloud and labels
+    data = np.load(
+        data_dir + '/cropped/cloud_{}.npz'.format(sys.argv[1]))
+    pointcloud, labels = data['pointcloud'], data['labels']
 
-    # Get an (X, 8, 3) array of the labels
-    labels = load_custom_label(label_path)
+    # Convert input labels to corner notation and snap them to fit
+    labels = load_numpy_label(labels)
 
-    labels = snap_labels(lidar, labels)
+    try:
+        labels = snap_labels(pointcloud, labels)
+    except ValueError:
+        print('At least one label contained no points:' +
+              'the labels were probably saved incorrectly')
+        sys.exit(2)
 
     # Voxelize the labels
-    features, coords, cloud_ind = voxelize(lidar, labels)
+    features, coords, cloud_ind = voxelize(pointcloud, labels)
 
-    # Select only the points inside of labels
+    # Separate the points by whether they are in a label
     cloud_ind = cloud_ind.astype(int)
-    only_label_pts = lidar[cloud_ind]
+    only_label_pts = pointcloud[cloud_ind]
+    non_label_pts = np.delete(pointcloud, cloud_ind, axis=0)
 
     # Generate a list of colors, one for each object instance (N, 3),
     # where N is the number of labels, and 3 encodes [R, G, B]
     label_colors = []
     for _ in range(features.shape[0]):
-        label_colors.append([uniform(0.0, 0.9), uniform(0.0, 0.9), uniform(0.0, 0.9)])
+        label_colors.append(
+            [uniform(0.0, 0.9), uniform(0.0, 0.9), uniform(0.0, 0.9)])
 
-    # Visualize the entire point cloud with black bounding boxes
-    black = [0, 0, 0]
-    black_boxes = []
-    for _ in range(labels.shape[0]):
-        black_boxes.append([black for _ in range(12)])
-
-    print('''Displaying the full point cloud and all labels:
-        {} labels and {} points'''.format(labels.shape[0], lidar.shape[0]))
-    visualize_lines_3d(
-        pointcloud=lidar, gt_boxes=labels, gt_box_colors=black_boxes, reduce_pts=False)
-    print('''Displaying the full point cloud and all labels compressed:
-        {} labels and {} points'''.format(labels.shape[0], lidar.shape[0]))
-    visualize_lines_3d(
-        pointcloud=lidar, gt_boxes=labels, gt_box_colors=black_boxes, reduce_pts=False)
-
-    # Visualize only points inside the labels and the bounding boxes
     color_boxes = []
     for i in range(labels.shape[0]):
         color_boxes.append([label_colors[i] for _ in range(12)])
 
-    print('''Displaying only points inside labels:
-        {} labels and {} points\n'''.format(labels.shape[0], only_label_pts.shape[0]))
-    visualize_lines_3d(
-        pointcloud=only_label_pts, gt_boxes=labels, gt_box_colors=color_boxes,
-        reduce_pts=True)
+    for i in range(int(sys.argv[2])):
+        if visualize:
+            print('Displaying original...')
+            display_voxels(
+                coords=coords, cloud=pointcloud, colors=label_colors)
+        augmented_features, augmented_coords, only_swap_coords = \
+            aug_data(features, coords)
+        augmented_cloud = features_to_cloud(augmented_features)
+        if visualize:
+            print('Displaying augmented labels for index {}...'.format(i))
+            display_voxels(
+                coords=augmented_coords, cloud=augmented_cloud,
+                colors=label_colors)
+        augmented_features, augmented_coords, new_pointcloud = \
+            aug_cloud(augmented_features, augmented_coords, non_label_pts)
+        if visualize:
+            print('Displaying final point cloud for index {}...'.format(i))
+            display_voxels(
+                coords=augmented_coords, cloud=new_pointcloud,
+                colors=label_colors)
 
-    # print('Displaying the voxelized labels\n')
-    # display_voxels(
-    #     coords, cloud=only_label_pts, colors=label_colors)
-
-    # augmented_features, augmented_coords, only_swap_coords = aug_data(features, coords)
-    # augmented_cloud = features_to_cloud(augmented_features)
-
-    # print('Displaying augmented data\n')
-    # display_voxels(
-    #     only_swap_coords, cloud=augmented_cloud, colors=label_colors)
-    
-
-    # Focus on one label
-    # label_idx = randint(0, len(coords) - 1)
-    # deltas = np.array([abs(coords[label_idx][0][3] - coords[label_idx][0][0]),
-    #                    abs(coords[label_idx][0][4] - coords[label_idx][0][1]),
-    #                    abs(coords[label_idx][len(coords[label_idx]) - 1][5] - coords[label_idx][0][2])])
-
-    # image_dims = int(deltas[2] * 50 + 30), int(deltas[0] * 100 + 30)
-    
-    # for i in range(20):
-    #     augmented_features, augmented_coords, only_swap_coords = aug_data(features, coords)
-    #     augmented_cloud = features_to_cloud(augmented_features)
-
-    #     image = np.zeros((image_dims[1], image_dims[0], 3), dtype=np.uint8)
-
-    #     for voxel in augmented_features[label_idx]:
-    #         for point in voxel:
-    #             y_image = int((point[0] - coords[label_idx][0][0]) * 100 + 15)
-    #             x_image = int((point[2]) * 50 + 15)
-    #             image = cv.circle(
-    #                 image, (x_image, y_image), radius=1, color=(0, 0, 255), thickness=-1)
-        
-    #     cv.imwrite('/home/aaron/CMU_VoxelNet/viz/data_aug/obj{}_iter{}.jpg'.format(label_idx, i), image)
-
-        
-
+        save_path = data_dir + '/cropped/cloud_{}_iter_{}'.format(
+            sys.argv[1], i)
+        np.savez(save_path, pointcloud=new_pointcloud,
+                 labels=coords_to_center(augmented_coords))
+        print('Saved index {} augmentation of cloud {} to {}'.format(
+            i, sys.argv[1], save_path))

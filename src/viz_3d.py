@@ -62,7 +62,7 @@ def save_viz_batch(pointcloud, boxes, gt_boxes, epoch, ids):
         save_viz_file(
             pointcloud=pointcloud[i],
             boxes=boxes[i], gt_boxes=gt_boxes[i],
-            name="epoch" + str(epoch) + "_pcl" + str(ids[i]),
+            name='epoch' + str(epoch) + '_pcl' + str(ids[i]),
             desc=[ids[i], epoch])
 
 
